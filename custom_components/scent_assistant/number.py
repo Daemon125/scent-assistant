@@ -9,7 +9,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, DeviceType
+from .const import CONF_MOMENTARY_SECONDS, DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -116,8 +116,8 @@ class MomentaryDurationNumber(NumberEntity):
     """Run time for the Diffuse Now button (Aroma-Link).
 
     Set to 0 to disable the automatic power-off after Diffuse Now, leaving
-    the diffuser powered on. Held on the device manager only — resets to
-    the default after an HA restart. Configuration entity, so it lands in
+    the diffuser powered on. Saved locally in the config entry options
+    and restored after an HA restart. Configuration entity, so it lands in
     the device's "Configuration" section rather than next to the live
     controls.
     """
@@ -135,6 +135,7 @@ class MomentaryDurationNumber(NumberEntity):
     def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
         self._device = device
         self._attr_unique_id = f"{device.unique_id}_momentary_duration"
+        self._entry = entry
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device.unique_id)},
         }
@@ -148,6 +149,14 @@ class MomentaryDurationNumber(NumberEntity):
         return self._device.available
 
     async def async_set_native_value(self, value: float) -> None:
+        if self.hass is not None:
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                options={
+                    **self._entry.options,
+                    CONF_MOMENTARY_SECONDS: int(value),
+                },
+            )
         self._device.momentary_seconds = int(value)
         if self.hass is not None:
             self.async_write_ha_state()

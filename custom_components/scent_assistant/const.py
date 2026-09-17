@@ -458,6 +458,7 @@ CONF_CLOUD_PASSWORD = "cloud_password"
 CONF_CLOUD_DEVICE_ID = "cloud_device_id"
 CONF_CLOUD_USER_ID = "cloud_user_id"
 CONF_CONNECTION_MODE = "connection_mode"
+CONF_MOMENTARY_SECONDS = "momentary_seconds"
 # Optional 4-char ASCII password for Scent Marketing GW devices (the
 # firmware sometimes ships locked; setting this lets the device accept
 # our control commands).

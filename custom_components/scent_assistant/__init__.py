@@ -21,6 +21,7 @@ from .const import (
     CONF_CLOUD_PASSWORD,
     CONF_CLOUD_DEVICE_ID,
     CONF_CONNECTION_MODE,
+    CONF_MOMENTARY_SECONDS,
     BLE_REFRESH_INTERVAL_SECONDS,
     CLOUD_POLL_INTERVAL_SECONDS,
     WEEKDAY_MON, WEEKDAY_TUE, WEEKDAY_WED, WEEKDAY_THU,
@@ -98,6 +99,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cloud_device_id=cloud_device_id,
         sm_metadata=entry.data.get("sm_metadata"),
         gw_password=entry.data.get("gw_password"),
+    )
+
+    # Restore local configuration before setting up the device and platforms.
+    device.momentary_seconds = entry.options.get(
+        CONF_MOMENTARY_SECONDS, device.momentary_seconds
     )
 
     # Initial state query (BLE: connects briefly then disconnects; Cloud: polls API)

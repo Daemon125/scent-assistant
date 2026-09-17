@@ -51,8 +51,8 @@ BLE_FAILURE_COOLDOWN_SECONDS = 3.0
 # 6-8 rapid connect attempts that can wedge some firmwares.
 BLE_CONNECT_MAX_ATTEMPTS = 2
 # Default run time for the momentary "Diffuse Now" button. Adjustable
-# per device via the Momentary Duration number entity (not persisted
-# across HA restarts).
+# per device via the Momentary Duration number entity and persisted
+# locally in the config entry options.
 DEFAULT_MOMENTARY_SECONDS = 30
 
 
