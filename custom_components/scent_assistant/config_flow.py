@@ -8,6 +8,7 @@ import voluptuous as vol
 from bleak import BleakScanner
 
 from homeassistant import config_entries
+from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from .const import (
     DOMAIN,
     CONF_DEVICE_TYPE,
@@ -77,6 +78,68 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"device": self._selected_ble_name or ""},
         )
 
+    def _needs_password_step(self) -> bool:
+        """GW and Scent Tech devices may be password-protected; we can't
+        tell before connecting, so offer the optional password prompt."""
+        return self._selected_device_type in (
+            DeviceType.SCENT_MARKETING_GW,
+            DeviceType.SCENT_MARKETING_GW_XOR,
+            DeviceType.SCENT_TECH,
+        )
+
+    # ------------------------------------------------------------------
+    # Bluetooth discovery (manifest "bluetooth" matchers)
+    # ------------------------------------------------------------------
+
+    async def async_step_bluetooth(
+        self, discovery_info: BluetoothServiceInfoBleak
+    ) -> config_entries.ConfigFlowResult:
+        """Handle a diffuser found by HA's Bluetooth integration.
+
+        The manifest matchers are deliberately broad (e.g. bare
+        manufacturer IDs), so run the same detection as the manual scan
+        and drop anything it doesn't recognise rather than offering it as
+        Aroma-Link.
+        """
+        await self.async_set_unique_id(discovery_info.address)
+        self._abort_if_unique_id_configured()
+
+        adv = discovery_info.advertisement
+        name = discovery_info.name or getattr(adv, "local_name", None) or ""
+        # BluetoothServiceInfo falls back to the address when a device
+        # advertises no name; treat that as nameless.
+        if name.replace("-", ":").upper() == discovery_info.address.upper():
+            name = ""
+        dtype = detect_device_type(name, adv)
+        if dtype is None:
+            return self.async_abort(reason="not_supported")
+        if not name:
+            name = f"Scent Marketing {discovery_info.address[-8:]}"
+
+        self._selected_ble_address = discovery_info.address
+        self._selected_ble_name = name
+        self._selected_device_type = dtype
+        self._selected_sm_metadata = (
+            extract_scent_marketing_metadata(adv)
+            if dtype.value.startswith("scent_marketing") else None
+        )
+        self.context["title_placeholders"] = {"name": name}
+        return await self.async_step_bluetooth_confirm()
+
+    async def async_step_bluetooth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Ask the user to confirm a discovered diffuser."""
+        if user_input is not None:
+            if self._needs_password_step():
+                return await self.async_step_gw_password()
+            return self._create_ble_entry()
+        self._set_confirm_only()
+        return self.async_show_form(
+            step_id="bluetooth_confirm",
+            description_placeholders={"name": self._selected_ble_name or ""},
+        )
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -106,19 +169,12 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._selected_device_type = device_info.get("device_type", "aroma_link")
                 self._selected_sm_metadata = device_info.get("sm_metadata")
 
-                # Check if already configured
-                await self.async_set_unique_id(address)
+                # Check if already configured. A pending discovery for the
+                # same device must not block setting it up by hand.
+                await self.async_set_unique_id(address, raise_on_progress=False)
                 self._abort_if_unique_id_configured()
 
-                # Scent Marketing GW and Scent Tech devices may be
-                # password-protected. We can't tell at scan time, so offer
-                # the user a chance to supply one. AK devices have no such
-                # mechanism.
-                if self._selected_device_type in (
-                    DeviceType.SCENT_MARKETING_GW,
-                    DeviceType.SCENT_MARKETING_GW_XOR,
-                    DeviceType.SCENT_TECH,
-                ):
+                if self._needs_password_step():
                     return await self.async_step_gw_password()
 
                 return self._create_ble_entry()
