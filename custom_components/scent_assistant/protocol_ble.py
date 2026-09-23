@@ -409,6 +409,13 @@ class AromaLinkBleProtocol(BleProtocol):
         xor = AromaLinkBleProtocol._xor_checksum(payload)
         return AL_HEADER + bytes([xor]) + payload + AL_TRAILER
 
+    @staticmethod
+    def write_sub(frame: bytes) -> int | None:
+        """Return the sub-command of a 57 write frame, else None."""
+        if len(frame) >= 6 and frame[:3] == AL_HEADER and frame[4] == AL_CMD_WRITE:
+            return frame[5]
+        return None
+
     def build_power(self, on: bool) -> bytes:
         return self._build_packet(bytes([AL_CMD_WRITE, AL_SUB_POWER, 0x01 if on else 0x00]))
 
@@ -549,6 +556,11 @@ class AromaLinkBleProtocol(BleProtocol):
         cmd = payload[0]
         sub = payload[1]
 
+        # Before dispatch, or a 52 1E NACK reads as 78 % oil.
+        if cmd in (AL_CMD_QUERY, AL_CMD_WRITE) and payload[2:] == b"NACK":
+            result["nack"] = sub
+            return result
+
         # "All work info" (0x0A) — arrives both as a reply to our 52 0A
         # query and as an unsolicited 53 0A push. Layout per the app's
         # handlerAllWorkStatus(); payload[2] is the app's offset i+6:
@@ -669,10 +681,9 @@ class AromaLinkBleProtocol(BleProtocol):
             # the byte is a straight 0–100 percentage.
             result["oil_remaining"] = max(0, min(100, payload[2]))
 
-        elif cmd == AL_CMD_WRITE and len(payload) >= 3:
-            # ACK responses (57 XX "ACK")
-            if payload[2:5] == b"ACK":
-                result["ack"] = sub
+        elif cmd == AL_CMD_WRITE:
+            # Any 57 reply other than NACK is an ACK, including empty data.
+            result["ack"] = sub
 
         return result
 

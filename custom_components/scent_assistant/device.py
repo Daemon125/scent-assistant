@@ -23,6 +23,7 @@ from .const import (
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
     AL_MANY_PUMP_DEVICE_CODES,
+    AL_SUB_POWER,
 )
 from .protocol_ble import (
     BleProtocol,
@@ -97,6 +98,8 @@ class ScentDiffuserDevice:
         self._ble_lock = asyncio.Lock()
         self._ble_disconnect_task: asyncio.Task | None = None
         self._ble_has_synced_time = False
+        # Sub-command byte of the last NACK reply.
+        self._ble_nack: int | None = None
         # Monotonic timestamp of the last failed BLE connect/write —
         # used to back off after errors instead of hammering a stuck
         # device (which can wedge a V3 diffuser's GATT stack badly
@@ -624,6 +627,7 @@ class ScentDiffuserDevice:
         """Connect, send command, schedule disconnect."""
         if not await self._ble_connect():
             return False
+        self._ble_nack = None
         try:
             success = await self._ble_send(data)
         except (BleakError, asyncio.TimeoutError, OSError) as err:
@@ -634,6 +638,17 @@ class ScentDiffuserDevice:
             return False
         # Wait briefly for notification response
         await asyncio.sleep(1.0)
+        write_sub = getattr(self._protocol, "write_sub", None)
+        if (
+            write_sub is not None
+            and self._ble_nack is not None
+            and write_sub(data) == self._ble_nack
+        ):
+            _LOGGER.warning(
+                "BLE write failed on %s: NACK for 57 %02X",
+                self._ble_name, self._ble_nack,
+            )
+            return False
         return success
 
     def _on_ble_notification(self, sender: int, data: bytearray) -> None:
@@ -646,6 +661,8 @@ class ScentDiffuserDevice:
         updates = self._protocol.parse_notification(raw)
         if not updates:
             return
+        if "nack" in updates:
+            self._ble_nack = updates["nack"]
 
         changed = False
         if "power" in updates:
@@ -866,7 +883,10 @@ class ScentDiffuserDevice:
             self._momentary_task.cancel()
         self._momentary_task = None
 
-        if not await self.set_power(True):
+        self._ble_nack = None
+        powered = await self.set_power(True)
+        # A NACKed power-on still arms the power-off: a running unit can clog.
+        if not powered and self._ble_nack != AL_SUB_POWER:
             return False
 
         if self.momentary_seconds > 0:
@@ -874,7 +894,7 @@ class ScentDiffuserDevice:
                 self._momentary_off_later(self.momentary_seconds)
             )
 
-        return True
+        return powered
 
     async def _momentary_off_later(self, delay: int) -> None:
         await asyncio.sleep(delay)
