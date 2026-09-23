@@ -1110,6 +1110,18 @@ class ScentDiffuserDevice:
         enabled: bool | None = None,
     ) -> bool:
         """Set a full schedule on the device."""
+        # Aroma-Link state is today's slot, unchanged by a mask without today.
+        kept = None
+        if (
+            isinstance(self._protocol, AromaLinkBleProtocol)
+            and not weekday_mask & (1 << datetime.now().weekday())
+        ):
+            kept = {
+                field: getattr(self._state, field) for field in (
+                    "start_hour", "start_minute", "end_hour", "end_minute",
+                    "work_seconds", "pause_seconds", "schedule_enabled",
+                )
+            }
         self._state.work_seconds = work_seconds
         self._state.pause_seconds = pause_seconds
         self._state.start_hour = start_hour
@@ -1124,9 +1136,14 @@ class ScentDiffuserDevice:
             self._state.schedule_enabled = enabled
 
         # An explicit work/pause schedule means Custom mode.
-        return await self._write_schedule_to_device(
+        result = await self._write_schedule_to_device(
             weekday_mask=weekday_mask, enabled=enabled, custom_mode=True,
         )
+        if kept is not None:
+            for field, value in kept.items():
+                setattr(self._state, field, value)
+            self._notify_state_changed()
+        return result
 
     async def _write_schedule_to_device(
         self,
