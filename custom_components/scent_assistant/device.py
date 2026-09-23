@@ -230,6 +230,11 @@ class ScentDiffuserDevice:
 
     @property
     def supports_fan(self) -> bool:
+        # A device that explicitly reports "no fan" wins over the family
+        # default; an unknown flag keeps the default so a failed first
+        # connect never drops the switch from a device that has one.
+        if self._state.has_fan is False:
+            return False
         return self._protocol.supports_fan()
 
     @property
@@ -656,6 +661,9 @@ class ScentDiffuserDevice:
             changed = True
         if "battery" in updates:
             self._state.battery = updates["battery"]
+            changed = True
+        if "has_fan" in updates:
+            self._state.has_fan = updates["has_fan"]
             changed = True
         if "rgb_on" in updates:
             self._state.rgb_on = updates["rgb_on"]

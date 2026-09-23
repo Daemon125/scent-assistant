@@ -90,6 +90,9 @@ class DiffuserState:
 
     power: bool | None = None
     fan: bool | None = None            # Aroma-Link only
+    # Aroma-Link capability flag from the 0A frame. None = not reported
+    # (yet); only an explicit False hides the fan switch.
+    has_fan: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -545,7 +548,7 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [13..14] work remaining (s, u16)  [15..16] pause remaining (s)
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
-        #   [31] has-battery flag  [32..] more capability flags
+        #   [31] has-battery flag  [32] has-fan flag  [33..] more flags
         # Fan/lamp at [10] are deliberately skipped: the nibble encoding
         # there conflicts with the 0x10 fan value on the 53 03 path. The
         # on/off byte and work status are plain bytes the app reads
@@ -568,6 +571,10 @@ class AromaLinkBleProtocol(BleProtocol):
             # flag is set (mains-only devices report 0 there).
             if len(payload) >= 32 and payload[31] == 1:
                 result["battery"] = max(0, min(100, payload[30]))
+            # The app hides its fan controls when this flag is 0
+            # (DeviceControlActivity: hintFan(getHasFan() == 0)).
+            if len(payload) >= 33:
+                result["has_fan"] = payload[32] != 0
             return result
 
         if cmd == AL_CMD_STATUS:

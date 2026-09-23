@@ -40,6 +40,7 @@ async def async_get_config_entry_diagnostics(
             "power": s.power,
             "phase": s.phase,
             "fan": s.fan,
+            "has_fan": s.has_fan,
             "level": s.level,
             "battery": s.battery,
             "oil_remaining": s.oil_remaining,
