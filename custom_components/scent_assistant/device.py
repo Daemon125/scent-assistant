@@ -141,6 +141,8 @@ class ScentDiffuserDevice:
         self._week_query_sent = False
         # Configured durations read from the device since the entry loaded.
         self._schedule_durations_read = False
+        # Schedule window read from the device since the entry loaded.
+        self._schedule_window_read = False
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -264,6 +266,20 @@ class ScentDiffuserDevice:
         if isinstance(proto, ScentMarketingAkProtocol):
             return proto.is_v3
         return False
+
+    @property
+    def schedule_window_read(self) -> bool:
+        """False while a BLE Aroma-Link unit has not reported its window."""
+        if self._ble_address and isinstance(self._protocol, AromaLinkBleProtocol):
+            return self._schedule_window_read
+        return True
+
+    @property
+    def schedule_durations_read(self) -> bool:
+        """False while a BLE Aroma-Link unit has not reported its durations."""
+        if self._ble_address and isinstance(self._protocol, AromaLinkBleProtocol):
+            return self._schedule_durations_read
+        return True
 
     @property
     def supports_cloud(self) -> bool:
@@ -686,6 +702,7 @@ class ScentDiffuserDevice:
         if "start_hour" in updates:
             self._state.start_hour = updates["start_hour"]
             self._state.start_minute = updates.get("start_minute", 0)
+            self._schedule_window_read = True
             changed = True
         if "end_hour" in updates:
             self._state.end_hour = updates["end_hour"]
@@ -1050,12 +1067,24 @@ class ScentDiffuserDevice:
 
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
+        if not (self.schedule_window_read and self.schedule_durations_read):
+            _LOGGER.warning(
+                "Schedule write skipped on %s: schedule not read from device yet",
+                self._ble_name,
+            )
+            return False
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
         return await self._write_schedule_to_device(custom_mode=True)
 
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
+        if not (self.schedule_window_read and self.schedule_durations_read):
+            _LOGGER.warning(
+                "Schedule write skipped on %s: schedule not read from device yet",
+                self._ble_name,
+            )
+            return False
         self._state.pause_seconds = seconds
         return await self._write_schedule_to_device(custom_mode=True)
 
