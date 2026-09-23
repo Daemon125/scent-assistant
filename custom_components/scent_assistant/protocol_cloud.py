@@ -19,6 +19,7 @@ from .const import (
     CLOUD_ENDPOINT_STATUS,
     CLOUD_ENDPOINT_SCHEDULE,
     CLOUD_ENDPOINT_WORK_TIME,
+    CLOUD_VERIFY_SSL,
     CLOUD_WEB_URL,
 )
 
@@ -115,7 +116,7 @@ class AromaLinkCloudClient:
                     },
                     data=form_data,
                     timeout=aiohttp.ClientTimeout(total=15),
-                    ssl=False,
+                    ssl=CLOUD_VERIFY_SSL,
                 ) as resp:
                     raw_text = await resp.text()
                     _LOGGER.debug("Cloud web login response [%s]: %s", resp.status, raw_text)
@@ -160,7 +161,7 @@ class AromaLinkCloudClient:
                 headers={"User-Agent": _USER_AGENT},
                 data=form,
                 timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Cloud login failed: HTTP %s", resp.status)
@@ -215,7 +216,7 @@ class AromaLinkCloudClient:
                 url,
                 headers=self._auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Cloud device list failed: HTTP %s", resp.status)
@@ -249,7 +250,7 @@ class AromaLinkCloudClient:
                 headers=self._auth_headers(),
                 data=form,
                 timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 raw_text = await resp.text()
                 _LOGGER.debug("Cloud power response [%s]: %s", resp.status, raw_text)
@@ -280,7 +281,7 @@ class AromaLinkCloudClient:
                 url,
                 headers=self._auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Cloud status failed: HTTP %s", resp.status)
@@ -318,7 +319,7 @@ class AromaLinkCloudClient:
                 url,
                 headers=self._auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Cloud schedule read failed: HTTP %s", resp.status)
@@ -421,7 +422,7 @@ class AromaLinkCloudClient:
                 },
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=20),
-                ssl=False,
+                ssl=CLOUD_VERIFY_SSL,
             ) as resp:
                 response_text = await resp.text()
                 _LOGGER.debug("Cloud schedule payload: %s", payload)

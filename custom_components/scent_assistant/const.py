@@ -403,6 +403,15 @@ SM_GW_XOR_DICT = bytes([
 CLOUD_BASE_URL = "https://www.aroma-link.com"
 CLOUD_WEB_URL = "https://www.aroma-link.com"
 
+# TLS certificate verification for the cloud API is deliberately off.
+# The vendor's own app (Aroma-Link 2.8.8) talks to this API over plain
+# http:// and never uses the certificate, while the certificate itself
+# is a 90-day one the vendor has no reason to keep renewing. Verifying
+# it would buy little (the app already sends the same credentials in
+# cleartext) at the cost of cloud mode breaking for every user whenever
+# the certificate lapses. Traffic stays encrypted either way.
+CLOUD_VERIFY_SSL = False
+
 CLOUD_ENDPOINT_TOKEN = "/v2/app/token"
 CLOUD_ENDPOINT_DEVICES = "/v1/app/device/listAll/{user_id}"
 CLOUD_ENDPOINT_SWITCH = "/v1/app/data/newSwitch"
