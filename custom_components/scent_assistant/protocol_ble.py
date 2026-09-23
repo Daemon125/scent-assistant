@@ -170,6 +170,8 @@ class DiffuserState:
     # though Power+Fan look active. On V2 this duplicates `power`
     # because V2 firmware only has the one toggle.
     schedule_enabled: bool | None = None
+    # Aroma-Link 52 15: 7 days (Mon..Sun) x 5 slot dicts, raw flag byte kept.
+    week_slots: list | None = None
 
 
 @dataclass
@@ -457,6 +459,10 @@ class AromaLinkBleProtocol(BleProtocol):
         """
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_LEVEL]))
 
+    def build_week_schedule_query(self) -> bytes:
+        """Build READ_WEEK_WORK_TIME (`52 15`, app: getAllWorkTimePack)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_QUERY_SCHEDULES]))
+
     def build_all_work_query(self) -> bytes:
         """Read the "all work info" register (`52 0A`).
 
@@ -640,6 +646,29 @@ class AromaLinkBleProtocol(BleProtocol):
                     result["work_seconds"] = work
                 if pause > 0:
                     result["pause_seconds"] = pause
+
+        elif cmd == AL_CMD_QUERY and sub == AL_SUB_QUERY_SCHEDULES and len(payload) >= 317:
+            # `52 15` + 7 days (Mon..Sun) x 5 slots of
+            # `<sH sM eH eM> <pump<<4|en> <work u16> <pause u16>`
+            week = []
+            for d in range(7):
+                day = []
+                for k in range(5):
+                    base = 2 + 45 * d + 9 * k
+                    flags = payload[base + 4]
+                    day.append({
+                        "start_hour": payload[base],
+                        "start_minute": payload[base + 1],
+                        "end_hour": payload[base + 2],
+                        "end_minute": payload[base + 3],
+                        "flags": flags,
+                        "pump": flags >> 4,
+                        "enabled": bool(flags & 0x0F),
+                        "work_seconds": (payload[base + 5] << 8) | payload[base + 6],
+                        "pause_seconds": (payload[base + 7] << 8) | payload[base + 8],
+                    })
+                week.append(day)
+            result["week_slots"] = week
 
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_OIL_LEVEL and len(payload) >= 3:
             # Read-register reply for the liquid level: `52 1E <percent>`.

@@ -78,6 +78,10 @@ async def async_get_config_entry_diagnostics(
                 {slot: asdict(timer) for slot, timer in s.timer_slots.items()}
                 if s.timer_slots else None
             ),
+            "week_enabled_slots": (
+                sum(sl["enabled"] for day in s.week_slots for sl in day)
+                if s.week_slots is not None else None
+            ),
         }
 
     payload: dict[str, Any] = {
