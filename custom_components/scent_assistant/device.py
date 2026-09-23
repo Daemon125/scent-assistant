@@ -1038,9 +1038,14 @@ class ScentDiffuserDevice:
                 self._ble_name,
             )
             return False
+        previous = self._state.work_seconds
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
-        return await self._write_schedule_to_device(custom_mode=True)
+        if await self._write_schedule_to_device(custom_mode=True):
+            return True
+        self._state.work_seconds = previous
+        self._notify_state_changed()
+        return False
 
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
@@ -1050,8 +1055,13 @@ class ScentDiffuserDevice:
                 self._ble_name,
             )
             return False
+        previous = self._state.pause_seconds
         self._state.pause_seconds = seconds
-        return await self._write_schedule_to_device(custom_mode=True)
+        if await self._write_schedule_to_device(custom_mode=True):
+            return True
+        self._state.pause_seconds = previous
+        self._notify_state_changed()
+        return False
 
     async def set_schedule(
         self,
@@ -1065,18 +1075,17 @@ class ScentDiffuserDevice:
         enabled: bool | None = None,
     ) -> bool:
         """Set a full schedule on the device."""
+        kept = {
+            field: getattr(self._state, field) for field in (
+                "start_hour", "start_minute", "end_hour", "end_minute",
+                "work_seconds", "pause_seconds", "schedule_enabled",
+            )
+        }
         # Aroma-Link state is today's slot, unchanged by a mask without today.
-        kept = None
-        if (
+        restore = (
             isinstance(self._protocol, AromaLinkBleProtocol)
             and not weekday_mask & (1 << datetime.now().weekday())
-        ):
-            kept = {
-                field: getattr(self._state, field) for field in (
-                    "start_hour", "start_minute", "end_hour", "end_minute",
-                    "work_seconds", "pause_seconds", "schedule_enabled",
-                )
-            }
+        )
         self._state.work_seconds = work_seconds
         self._state.pause_seconds = pause_seconds
         self._state.start_hour = start_hour
@@ -1094,7 +1103,7 @@ class ScentDiffuserDevice:
         result = await self._write_schedule_to_device(
             weekday_mask=weekday_mask, enabled=enabled, custom_mode=True,
         )
-        if kept is not None:
+        if restore or not result:
             for field, value in kept.items():
                 setattr(self._state, field, value)
             self._notify_state_changed()
