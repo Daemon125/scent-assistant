@@ -65,7 +65,7 @@ from .const import (
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
     AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
-    AL_SLOT_ENABLED, AL_SLOT_DISABLED,
+    AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
 )
 
@@ -156,6 +156,10 @@ class DiffuserState:
     schedule_enabled: bool | None = None
     # Aroma-Link 52 15: 7 days (Mon..Sun) x 5 slot dicts, raw flag byte kept.
     week_slots: list | None = None
+    # Aroma-Link 52/53 0A byte 25, 53 09 byte 15: pump nibble.
+    pump: int | None = None
+    # Aroma-Link 0A bytes 51-52: deviceCode.
+    device_code: int | None = None
 
 
 @dataclass
@@ -169,6 +173,7 @@ class ScheduleSlot:
     enabled: bool = False
     work_seconds: int = 10
     pause_seconds: int = 120
+    pump: int = 1
 
 
 @dataclass
@@ -428,7 +433,7 @@ class AromaLinkBleProtocol(BleProtocol):
         """READ_WORK_FREQUENCY for one weekday (0 = Sun … 6 = Sat).
 
         Reply: `52 06 <weekday>` then five slots of
-        `<work u16> <pause u16> <level<<4 | enabled>` — the configured
+        `<work u16> <pause u16> <pump<<4 | enabled>`: the configured
         durations, as opposed to the countdowns in 53 09 / 52 0A.
         Mirrors the app's getWorkFrePack().
         """
@@ -476,6 +481,7 @@ class AromaLinkBleProtocol(BleProtocol):
             slots: Up to 5 time slots. Missing slots filled with disabled defaults.
         """
         data = bytearray([weekday_mask])
+        pad_flags = (slots[0].pump << 4) if slots else AL_SLOT_DISABLED
 
         for i in range(5):
             if i < len(slots):
@@ -483,14 +489,14 @@ class AromaLinkBleProtocol(BleProtocol):
                 data.extend([
                     s.start_hour, s.start_minute,
                     s.end_hour, s.end_minute,
-                    AL_SLOT_ENABLED if s.enabled else AL_SLOT_DISABLED,
+                    (s.pump << 4) | (1 if s.enabled else 0),
                     (s.work_seconds >> 8) & 0xFF, s.work_seconds & 0xFF,
                     (s.pause_seconds >> 8) & 0xFF, s.pause_seconds & 0xFF,
                 ])
             else:
                 data.extend([
                     0, 0, 0, 0,          # 00:00 - 00:00
-                    AL_SLOT_DISABLED,
+                    pad_flags,
                     0x00, 0x0A,          # work = 10
                     0x00, 0x78,          # pause = 120
                 ])
@@ -552,6 +558,7 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32..] more capability flags
+        #   [47..48] deviceCode (u16)
         # Fan/lamp at [10] are deliberately skipped: the nibble encoding
         # there conflicts with the 0x10 fan value on the 53 03 path. The
         # on/off byte and work status are plain bytes the app reads
@@ -570,10 +577,14 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["start_minute"] = payload[18]
                 result["end_hour"] = payload[19]
                 result["end_minute"] = payload[20]
+            if len(payload) >= 22:
+                result["pump"] = payload[21]
             # Battery is only meaningful when the has-battery capability
             # flag is set (mains-only devices report 0 there).
             if len(payload) >= 32 and payload[31] == 1:
                 result["battery"] = max(0, min(100, payload[30]))
+            if len(payload) >= 49:
+                result["device_code"] = (payload[47] << 8) | payload[48]
             return result
 
         if cmd == AL_CMD_STATUS:
@@ -602,9 +613,11 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["start_minute"] = payload[8]
                 result["end_hour"] = payload[9]
                 result["end_minute"] = payload[10]
+                if len(payload) >= 12:
+                    result["pump"] = payload[11]
 
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_WORK_FREQUENCY and len(payload) >= 8:
-            # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <level<<4|enabled>`
+            # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <pump<<4|enabled>`
             # (app: handlerWorkFre). Prefer the first enabled slot; fall
             # back to the first slot so a disabled schedule still shows
             # the durations the user last set — same policy as the cloud

@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
+    AL_MANY_PUMP_DEVICE_CODES,
 )
 from .protocol_ble import (
     BleProtocol,
@@ -737,11 +738,20 @@ class ScentDiffuserDevice:
         if "schedule_enabled" in updates:
             self._state.schedule_enabled = updates["schedule_enabled"]
             changed = True
+        if "pump" in updates:
+            self._state.pump = updates["pump"]
+            changed = True
+        if "device_code" in updates:
+            self._state.device_code = updates["device_code"]
+            changed = True
         if "week_slots" in updates:
             self._state.week_slots = updates["week_slots"]
             day = updates["week_slots"][datetime.now().weekday()]
-            slot = next((s for s in day if s["enabled"]), day[0])
-            self._state.schedule_enabled = slot["enabled"]
+            if self._state.device_code in AL_MANY_PUMP_DEVICE_CODES:
+                slot = day[0]
+            else:
+                slot = next((s for s in day if s["enabled"]), day[0])
+                self._state.schedule_enabled = slot["enabled"]
             if slot["work_seconds"] > 0:
                 self._state.work_seconds = slot["work_seconds"]
             if slot["pause_seconds"] > 0:
@@ -1052,7 +1062,7 @@ class ScentDiffuserDevice:
         end_minute: int,
         work_seconds: int,
         pause_seconds: int,
-        enabled: bool = True,
+        enabled: bool | None = None,
     ) -> bool:
         """Set a full schedule on the device."""
         self._state.work_seconds = work_seconds
@@ -1061,6 +1071,12 @@ class ScentDiffuserDevice:
         self._state.start_minute = start_minute
         self._state.end_hour = end_hour
         self._state.end_minute = end_minute
+        if (
+            enabled is not None
+            and self._ble_address
+            and isinstance(self._protocol, AromaLinkBleProtocol)
+        ):
+            self._state.schedule_enabled = enabled
 
         # An explicit work/pause schedule means Custom mode.
         return await self._write_schedule_to_device(
@@ -1070,7 +1086,7 @@ class ScentDiffuserDevice:
     async def _write_schedule_to_device(
         self,
         weekday_mask: int | None = None,
-        enabled: bool = True,
+        enabled: bool | None = None,
         custom_mode: bool | None = None,
     ) -> bool:
         """Write the current schedule state to the device.
@@ -1087,6 +1103,14 @@ class ScentDiffuserDevice:
         """
         if weekday_mask is None:
             weekday_mask = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
+        if enabled is None:
+            enabled = self._state.schedule_enabled
+            if (
+                enabled is None
+                or not isinstance(self._protocol, AromaLinkBleProtocol)
+                or self._state.device_code in AL_MANY_PUMP_DEVICE_CODES
+            ):
+                enabled = True
         work = self._state.work_seconds or DEFAULT_WORK_DURATION
         pause = self._state.pause_seconds or DEFAULT_PAUSE_DURATION
         s_h = self._state.start_hour
@@ -1105,9 +1129,17 @@ class ScentDiffuserDevice:
                 )
                 cmd = self._protocol.build_schedule([setup])
             elif isinstance(self._protocol, AromaLinkBleProtocol):
+                pump = self._state.pump
+                if (
+                    pump is None
+                    or pump > 0x0F
+                    or self._state.device_code in AL_MANY_PUMP_DEVICE_CODES
+                ):
+                    pump = 1
                 slot = ScheduleSlot(
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,
+                    pump=pump,
                 )
                 cmd = self._protocol.build_schedule(weekday_mask, [slot])
             elif isinstance(self._protocol, ScentMarketingGwProtocol):

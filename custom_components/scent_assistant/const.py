@@ -300,6 +300,8 @@ AL_FAN_OFF_VALUE = 0x00
 
 AL_SLOT_ENABLED = 0x11
 AL_SLOT_DISABLED = 0x10
+# deviceCode of many-pump units: their slot flag byte is a pump bitmap.
+AL_MANY_PUMP_DEVICE_CODES = (0x2502, 0x2503)
 
 # Status report phases
 AL_PHASE_IDLE = 0x00

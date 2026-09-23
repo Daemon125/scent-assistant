@@ -76,6 +76,8 @@ async def async_get_config_entry_diagnostics(
                 sum(sl["enabled"] for day in s.week_slots for sl in day)
                 if s.week_slots is not None else None
             ),
+            "pump": s.pump,
+            "device_code": s.device_code,
         }
 
     payload: dict[str, Any] = {
