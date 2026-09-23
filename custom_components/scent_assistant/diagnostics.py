@@ -72,6 +72,10 @@ async def async_get_config_entry_diagnostics(
             "device_label": s.device_label,
             "model_code": s.model_code,
             "schedule_enabled": s.schedule_enabled,
+            "week_enabled_slots": (
+                sum(sl["enabled"] for day in s.week_slots for sl in day)
+                if s.week_slots is not None else None
+            ),
         }
 
     payload: dict[str, Any] = {

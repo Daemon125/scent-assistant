@@ -134,6 +134,9 @@ class ScentDiffuserDevice:
         # state. Lets a user tell a fresh reading from a stale one
         # without the entity flapping to unavailable (#32).
         self._ble_last_update: datetime | None = None
+        self._week_query_sent = False
+        # Configured durations read from the device since the entry loaded.
+        self._schedule_durations_read = False
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -643,6 +646,8 @@ class ScentDiffuserDevice:
         if "pause_seconds" in updates:
             self._state.pause_seconds = updates["pause_seconds"]
             changed = True
+        if "work_seconds" in updates and "pause_seconds" in updates:
+            self._schedule_durations_read = True
         if "start_hour" in updates:
             self._state.start_hour = updates["start_hour"]
             self._state.start_minute = updates.get("start_minute", 0)
@@ -714,6 +719,18 @@ class ScentDiffuserDevice:
             changed = True
         if "schedule_enabled" in updates:
             self._state.schedule_enabled = updates["schedule_enabled"]
+            changed = True
+        if "week_slots" in updates:
+            self._state.week_slots = updates["week_slots"]
+            day = updates["week_slots"][datetime.now().weekday()]
+            slot = next((s for s in day if s["enabled"]), day[0])
+            self._state.schedule_enabled = slot["enabled"]
+            if slot["work_seconds"] > 0:
+                self._state.work_seconds = slot["work_seconds"]
+            if slot["pause_seconds"] > 0:
+                self._state.pause_seconds = slot["pause_seconds"]
+            if slot["work_seconds"] > 0 and slot["pause_seconds"] > 0:
+                self._schedule_durations_read = True
             changed = True
 
         # Derive oil days-remaining from the latest oil + schedule state.
@@ -1164,6 +1181,16 @@ class ScentDiffuserDevice:
                     if freq_query is not None:
                         weekday = (datetime.now().weekday() + 1) % 7
                         await self._ble_send(freq_query(weekday))
+                        await asyncio.sleep(0.3)
+                    # 52 15 fallback: its 324-byte reply floods notifications.
+                    week_query = getattr(self._protocol, "build_week_schedule_query", None)
+                    if (
+                        week_query is not None
+                        and not self._schedule_durations_read
+                        and not self._week_query_sent
+                        and await self._ble_send(week_query())
+                    ):
+                        self._week_query_sent = True
                         await asyncio.sleep(0.3)
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
