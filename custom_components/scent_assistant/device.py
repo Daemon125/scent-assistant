@@ -22,6 +22,8 @@ from .const import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
+    AL_MANY_PUMP_DEVICE_CODES,
+    AL_SUB_POWER,
 )
 from .protocol_ble import (
     BleProtocol,
@@ -96,6 +98,8 @@ class ScentDiffuserDevice:
         self._ble_lock = asyncio.Lock()
         self._ble_disconnect_task: asyncio.Task | None = None
         self._ble_has_synced_time = False
+        # Sub-command byte of the last NACK reply.
+        self._ble_nack: int | None = None
         # Monotonic timestamp of the last failed BLE connect/write —
         # used to back off after errors instead of hammering a stuck
         # device (which can wedge a V3 diffuser's GATT stack badly
@@ -134,6 +138,11 @@ class ScentDiffuserDevice:
         # state. Lets a user tell a fresh reading from a stale one
         # without the entity flapping to unavailable (#32).
         self._ble_last_update: datetime | None = None
+        self._week_query_sent = False
+        # Configured durations read from the device since the entry loaded.
+        self._schedule_durations_read = False
+        # Schedule window read from the device since the entry loaded.
+        self._schedule_window_read = False
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -244,6 +253,20 @@ class ScentDiffuserDevice:
         if isinstance(proto, ScentMarketingAkProtocol):
             return proto.is_v3
         return False
+
+    @property
+    def schedule_window_read(self) -> bool:
+        """False while a BLE Aroma-Link unit has not reported its window."""
+        if self._ble_address and isinstance(self._protocol, AromaLinkBleProtocol):
+            return self._schedule_window_read
+        return True
+
+    @property
+    def schedule_durations_read(self) -> bool:
+        """False while a BLE Aroma-Link unit has not reported its durations."""
+        if self._ble_address and isinstance(self._protocol, AromaLinkBleProtocol):
+            return self._schedule_durations_read
+        return True
 
     @property
     def supports_cloud(self) -> bool:
@@ -604,6 +627,7 @@ class ScentDiffuserDevice:
         """Connect, send command, schedule disconnect."""
         if not await self._ble_connect():
             return False
+        self._ble_nack = None
         try:
             success = await self._ble_send(data)
         except (BleakError, asyncio.TimeoutError, OSError) as err:
@@ -614,6 +638,17 @@ class ScentDiffuserDevice:
             return False
         # Wait briefly for notification response
         await asyncio.sleep(1.0)
+        write_sub = getattr(self._protocol, "write_sub", None)
+        if (
+            write_sub is not None
+            and self._ble_nack is not None
+            and write_sub(data) == self._ble_nack
+        ):
+            _LOGGER.warning(
+                "BLE write failed on %s: NACK for 57 %02X",
+                self._ble_name, self._ble_nack,
+            )
+            return False
         return success
 
     def _on_ble_notification(self, sender: int, data: bytearray) -> None:
@@ -626,6 +661,8 @@ class ScentDiffuserDevice:
         updates = self._protocol.parse_notification(raw)
         if not updates:
             return
+        if "nack" in updates:
+            self._ble_nack = updates["nack"]
 
         changed = False
         if "power" in updates:
@@ -643,9 +680,12 @@ class ScentDiffuserDevice:
         if "pause_seconds" in updates:
             self._state.pause_seconds = updates["pause_seconds"]
             changed = True
+        if "work_seconds" in updates and "pause_seconds" in updates:
+            self._schedule_durations_read = True
         if "start_hour" in updates:
             self._state.start_hour = updates["start_hour"]
             self._state.start_minute = updates.get("start_minute", 0)
+            self._schedule_window_read = True
             changed = True
         if "end_hour" in updates:
             self._state.end_hour = updates["end_hour"]
@@ -714,6 +754,27 @@ class ScentDiffuserDevice:
             changed = True
         if "schedule_enabled" in updates:
             self._state.schedule_enabled = updates["schedule_enabled"]
+            changed = True
+        if "pump" in updates:
+            self._state.pump = updates["pump"]
+            changed = True
+        if "device_code" in updates:
+            self._state.device_code = updates["device_code"]
+            changed = True
+        if "week_slots" in updates:
+            self._state.week_slots = updates["week_slots"]
+            day = updates["week_slots"][datetime.now().weekday()]
+            if self._state.device_code in AL_MANY_PUMP_DEVICE_CODES:
+                slot = day[0]
+            else:
+                slot = next((s for s in day if s["enabled"]), day[0])
+                self._state.schedule_enabled = slot["enabled"]
+            if slot["work_seconds"] > 0:
+                self._state.work_seconds = slot["work_seconds"]
+            if slot["pause_seconds"] > 0:
+                self._state.pause_seconds = slot["pause_seconds"]
+            if slot["work_seconds"] > 0 and slot["pause_seconds"] > 0:
+                self._schedule_durations_read = True
             changed = True
 
         # Derive oil days-remaining from the latest oil + schedule state.
@@ -822,7 +883,10 @@ class ScentDiffuserDevice:
             self._momentary_task.cancel()
         self._momentary_task = None
 
-        if not await self.set_power(True):
+        self._ble_nack = None
+        powered = await self.set_power(True)
+        # A NACKed power-on still arms the power-off: a running unit can clog.
+        if not powered and self._ble_nack != AL_SUB_POWER:
             return False
 
         if self.momentary_seconds > 0:
@@ -830,7 +894,7 @@ class ScentDiffuserDevice:
                 self._momentary_off_later(self.momentary_seconds)
             )
 
-        return True
+        return powered
 
     async def _momentary_off_later(self, delay: int) -> None:
         await asyncio.sleep(delay)
@@ -988,14 +1052,36 @@ class ScentDiffuserDevice:
 
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
+        if not (self.schedule_window_read and self.schedule_durations_read):
+            _LOGGER.warning(
+                "Schedule write skipped on %s: schedule not read from device yet",
+                self._ble_name,
+            )
+            return False
+        previous = self._state.work_seconds
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
-        return await self._write_schedule_to_device(custom_mode=True)
+        if await self._write_schedule_to_device(custom_mode=True):
+            return True
+        self._state.work_seconds = previous
+        self._notify_state_changed()
+        return False
 
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
+        if not (self.schedule_window_read and self.schedule_durations_read):
+            _LOGGER.warning(
+                "Schedule write skipped on %s: schedule not read from device yet",
+                self._ble_name,
+            )
+            return False
+        previous = self._state.pause_seconds
         self._state.pause_seconds = seconds
-        return await self._write_schedule_to_device(custom_mode=True)
+        if await self._write_schedule_to_device(custom_mode=True):
+            return True
+        self._state.pause_seconds = previous
+        self._notify_state_changed()
+        return False
 
     async def set_schedule(
         self,
@@ -1006,25 +1092,47 @@ class ScentDiffuserDevice:
         end_minute: int,
         work_seconds: int,
         pause_seconds: int,
-        enabled: bool = True,
+        enabled: bool | None = None,
     ) -> bool:
         """Set a full schedule on the device."""
+        kept = {
+            field: getattr(self._state, field) for field in (
+                "start_hour", "start_minute", "end_hour", "end_minute",
+                "work_seconds", "pause_seconds", "schedule_enabled",
+            )
+        }
+        # Aroma-Link state is today's slot, unchanged by a mask without today.
+        restore = (
+            isinstance(self._protocol, AromaLinkBleProtocol)
+            and not weekday_mask & (1 << datetime.now().weekday())
+        )
         self._state.work_seconds = work_seconds
         self._state.pause_seconds = pause_seconds
         self._state.start_hour = start_hour
         self._state.start_minute = start_minute
         self._state.end_hour = end_hour
         self._state.end_minute = end_minute
+        if (
+            enabled is not None
+            and self._ble_address
+            and isinstance(self._protocol, AromaLinkBleProtocol)
+        ):
+            self._state.schedule_enabled = enabled
 
         # An explicit work/pause schedule means Custom mode.
-        return await self._write_schedule_to_device(
+        result = await self._write_schedule_to_device(
             weekday_mask=weekday_mask, enabled=enabled, custom_mode=True,
         )
+        if restore or not result:
+            for field, value in kept.items():
+                setattr(self._state, field, value)
+            self._notify_state_changed()
+        return result
 
     async def _write_schedule_to_device(
         self,
         weekday_mask: int | None = None,
-        enabled: bool = True,
+        enabled: bool | None = None,
         custom_mode: bool | None = None,
     ) -> bool:
         """Write the current schedule state to the device.
@@ -1041,6 +1149,14 @@ class ScentDiffuserDevice:
         """
         if weekday_mask is None:
             weekday_mask = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
+        if enabled is None:
+            enabled = self._state.schedule_enabled
+            if (
+                enabled is None
+                or not isinstance(self._protocol, AromaLinkBleProtocol)
+                or self._state.device_code in AL_MANY_PUMP_DEVICE_CODES
+            ):
+                enabled = True
         work = self._state.work_seconds or DEFAULT_WORK_DURATION
         pause = self._state.pause_seconds or DEFAULT_PAUSE_DURATION
         s_h = self._state.start_hour
@@ -1059,9 +1175,17 @@ class ScentDiffuserDevice:
                 )
                 cmd = self._protocol.build_schedule([setup])
             elif isinstance(self._protocol, AromaLinkBleProtocol):
+                pump = self._state.pump
+                if (
+                    pump is None
+                    or pump > 0x0F
+                    or self._state.device_code in AL_MANY_PUMP_DEVICE_CODES
+                ):
+                    pump = 1
                 slot = ScheduleSlot(
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,
+                    pump=pump,
                 )
                 cmd = self._protocol.build_schedule(weekday_mask, [slot])
             elif isinstance(self._protocol, ScentMarketingGwProtocol):
@@ -1164,6 +1288,16 @@ class ScentDiffuserDevice:
                     if freq_query is not None:
                         weekday = (datetime.now().weekday() + 1) % 7
                         await self._ble_send(freq_query(weekday))
+                        await asyncio.sleep(0.3)
+                    # 52 15 fallback: its 324-byte reply floods notifications.
+                    week_query = getattr(self._protocol, "build_week_schedule_query", None)
+                    if (
+                        week_query is not None
+                        and not self._schedule_durations_read
+                        and not self._week_query_sent
+                        and await self._ble_send(week_query())
+                    ):
+                        self._week_query_sent = True
                         await asyncio.sleep(0.3)
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)

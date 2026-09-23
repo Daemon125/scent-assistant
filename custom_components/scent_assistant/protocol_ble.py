@@ -65,7 +65,7 @@ from .const import (
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
     AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
-    AL_SLOT_ENABLED, AL_SLOT_DISABLED,
+    AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
 )
 
@@ -154,6 +154,12 @@ class DiffuserState:
     # though Power+Fan look active. On V2 this duplicates `power`
     # because V2 firmware only has the one toggle.
     schedule_enabled: bool | None = None
+    # Aroma-Link 52 15: 7 days (Mon..Sun) x 5 slot dicts, raw flag byte kept.
+    week_slots: list | None = None
+    # Aroma-Link 52/53 0A byte 25, 53 09 byte 15: pump nibble.
+    pump: int | None = None
+    # Aroma-Link 0A bytes 51-52: deviceCode.
+    device_code: int | None = None
 
 
 @dataclass
@@ -167,6 +173,7 @@ class ScheduleSlot:
     enabled: bool = False
     work_seconds: int = 10
     pause_seconds: int = 120
+    pump: int = 1
 
 
 @dataclass
@@ -402,6 +409,13 @@ class AromaLinkBleProtocol(BleProtocol):
         xor = AromaLinkBleProtocol._xor_checksum(payload)
         return AL_HEADER + bytes([xor]) + payload + AL_TRAILER
 
+    @staticmethod
+    def write_sub(frame: bytes) -> int | None:
+        """Return the sub-command of a 57 write frame, else None."""
+        if len(frame) >= 6 and frame[:3] == AL_HEADER and frame[4] == AL_CMD_WRITE:
+            return frame[5]
+        return None
+
     def build_power(self, on: bool) -> bytes:
         return self._build_packet(bytes([AL_CMD_WRITE, AL_SUB_POWER, 0x01 if on else 0x00]))
 
@@ -426,7 +440,7 @@ class AromaLinkBleProtocol(BleProtocol):
         """READ_WORK_FREQUENCY for one weekday (0 = Sun … 6 = Sat).
 
         Reply: `52 06 <weekday>` then five slots of
-        `<work u16> <pause u16> <level<<4 | enabled>` — the configured
+        `<work u16> <pause u16> <pump<<4 | enabled>`: the configured
         durations, as opposed to the countdowns in 53 09 / 52 0A.
         Mirrors the app's getWorkFrePack().
         """
@@ -440,6 +454,10 @@ class AromaLinkBleProtocol(BleProtocol):
         parsed below into `oil_remaining`.
         """
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_LEVEL]))
+
+    def build_week_schedule_query(self) -> bytes:
+        """Build READ_WEEK_WORK_TIME (`52 15`, app: getAllWorkTimePack)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_QUERY_SCHEDULES]))
 
     def build_all_work_query(self) -> bytes:
         """Read the "all work info" register (`52 0A`).
@@ -470,6 +488,7 @@ class AromaLinkBleProtocol(BleProtocol):
             slots: Up to 5 time slots. Missing slots filled with disabled defaults.
         """
         data = bytearray([weekday_mask])
+        pad_flags = (slots[0].pump << 4) if slots else AL_SLOT_DISABLED
 
         for i in range(5):
             if i < len(slots):
@@ -477,14 +496,14 @@ class AromaLinkBleProtocol(BleProtocol):
                 data.extend([
                     s.start_hour, s.start_minute,
                     s.end_hour, s.end_minute,
-                    AL_SLOT_ENABLED if s.enabled else AL_SLOT_DISABLED,
+                    (s.pump << 4) | (1 if s.enabled else 0),
                     (s.work_seconds >> 8) & 0xFF, s.work_seconds & 0xFF,
                     (s.pause_seconds >> 8) & 0xFF, s.pause_seconds & 0xFF,
                 ])
             else:
                 data.extend([
                     0, 0, 0, 0,          # 00:00 - 00:00
-                    AL_SLOT_DISABLED,
+                    pad_flags,
                     0x00, 0x0A,          # work = 10
                     0x00, 0x78,          # pause = 120
                 ])
@@ -537,6 +556,11 @@ class AromaLinkBleProtocol(BleProtocol):
         cmd = payload[0]
         sub = payload[1]
 
+        # Before dispatch, or a 52 1E NACK reads as 78 % oil.
+        if cmd in (AL_CMD_QUERY, AL_CMD_WRITE) and payload[2:] == b"NACK":
+            result["nack"] = sub
+            return result
+
         # "All work info" (0x0A) — arrives both as a reply to our 52 0A
         # query and as an unsolicited 53 0A push. Layout per the app's
         # handlerAllWorkStatus(); payload[2] is the app's offset i+6:
@@ -546,6 +570,7 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32..] more capability flags
+        #   [47..48] deviceCode (u16)
         # Fan/lamp at [10] are deliberately skipped: the nibble encoding
         # there conflicts with the 0x10 fan value on the 53 03 path. The
         # on/off byte and work status are plain bytes the app reads
@@ -564,10 +589,14 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["start_minute"] = payload[18]
                 result["end_hour"] = payload[19]
                 result["end_minute"] = payload[20]
+            if len(payload) >= 22:
+                result["pump"] = payload[21]
             # Battery is only meaningful when the has-battery capability
             # flag is set (mains-only devices report 0 there).
             if len(payload) >= 32 and payload[31] == 1:
                 result["battery"] = max(0, min(100, payload[30]))
+            if len(payload) >= 49:
+                result["device_code"] = (payload[47] << 8) | payload[48]
             return result
 
         if cmd == AL_CMD_STATUS:
@@ -596,9 +625,11 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["start_minute"] = payload[8]
                 result["end_hour"] = payload[9]
                 result["end_minute"] = payload[10]
+                if len(payload) >= 12:
+                    result["pump"] = payload[11]
 
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_WORK_FREQUENCY and len(payload) >= 8:
-            # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <level<<4|enabled>`
+            # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <pump<<4|enabled>`
             # (app: handlerWorkFre). Prefer the first enabled slot; fall
             # back to the first slot so a disabled schedule still shows
             # the durations the user last set — same policy as the cloud
@@ -621,16 +652,38 @@ class AromaLinkBleProtocol(BleProtocol):
                 if pause > 0:
                     result["pause_seconds"] = pause
 
+        elif cmd == AL_CMD_QUERY and sub == AL_SUB_QUERY_SCHEDULES and len(payload) >= 317:
+            # `52 15` + 7 days (Mon..Sun) x 5 slots of
+            # `<sH sM eH eM> <pump<<4|en> <work u16> <pause u16>`
+            week = []
+            for d in range(7):
+                day = []
+                for k in range(5):
+                    base = 2 + 45 * d + 9 * k
+                    flags = payload[base + 4]
+                    day.append({
+                        "start_hour": payload[base],
+                        "start_minute": payload[base + 1],
+                        "end_hour": payload[base + 2],
+                        "end_minute": payload[base + 3],
+                        "flags": flags,
+                        "pump": flags >> 4,
+                        "enabled": bool(flags & 0x0F),
+                        "work_seconds": (payload[base + 5] << 8) | payload[base + 6],
+                        "pause_seconds": (payload[base + 7] << 8) | payload[base + 8],
+                    })
+                week.append(day)
+            result["week_slots"] = week
+
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_OIL_LEVEL and len(payload) >= 3:
             # Read-register reply for the liquid level: `52 1E <percent>`.
             # @ndoty's capture showed 0x50 (80) matching the app's 80%, so
             # the byte is a straight 0–100 percentage.
             result["oil_remaining"] = max(0, min(100, payload[2]))
 
-        elif cmd == AL_CMD_WRITE and len(payload) >= 3:
-            # ACK responses (57 XX "ACK")
-            if payload[2:5] == b"ACK":
-                result["ack"] = sub
+        elif cmd == AL_CMD_WRITE:
+            # Any 57 reply other than NACK is an ACK, including empty data.
+            result["ack"] = sub
 
         return result
 
