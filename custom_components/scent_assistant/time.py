@@ -78,8 +78,6 @@ class DiffuserStartTime(TimeEntity):
                 self._device.name,
             )
             return
-        self._device.state.start_hour = value.hour
-        self._device.state.start_minute = value.minute
         await self._device.set_schedule(
             weekday_mask=0x7F,  # all days
             start_hour=value.hour,
@@ -129,8 +127,6 @@ class DiffuserEndTime(TimeEntity):
                 self._device.name,
             )
             return
-        self._device.state.end_hour = value.hour
-        self._device.state.end_minute = value.minute
         await self._device.set_schedule(
             weekday_mask=0x7F,  # all days
             start_hour=self._device.state.start_hour,
