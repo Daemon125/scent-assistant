@@ -78,6 +78,12 @@ async def async_get_config_entry_diagnostics(
                 {slot: asdict(timer) for slot, timer in s.timer_slots.items()}
                 if s.timer_slots else None
             ),
+            "week_enabled_slots": (
+                sum(sl["enabled"] for day in s.week_slots for sl in day)
+                if s.week_slots is not None else None
+            ),
+            "pump": s.pump,
+            "device_code": s.device_code,
         }
 
     payload: dict[str, Any] = {
@@ -99,6 +105,8 @@ async def async_get_config_entry_diagnostics(
             "periodic_refresh": device.supports_periodic_refresh if device else None,
             "supports_fan": device.supports_fan if device else None,
             "supports_cloud": device.supports_cloud if device else None,
+            "schedule_window_read": device.schedule_window_read if device else None,
+            "schedule_durations_read": device.schedule_durations_read if device else None,
         },
         "sm_metadata": async_redact_data(
             dict(device.sm_metadata) if device and device.sm_metadata else {},
