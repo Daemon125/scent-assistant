@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
 
 from .const import (
     DeviceType,
@@ -49,6 +49,16 @@ from .const import (
     SM_GW_INIT_PACKET, SM_GW_HEARTBEAT_HEX, SM_GW_XOR_DICT,
     AROMELY_SERVICE_UUID, AROMELY_CHAR_WRITE_UUID, AROMELY_CHAR_NOTIFY_UUID,
     AROMELY_ADV_SERVICE_UUID,
+    SCENT_TECH_SERVICE_UUID, SCENT_TECH_CHAR_UUID,
+    SCENT_TECH_HEADER, SCENT_TECH_TRAILER,
+    SCENT_TECH_CMD_TIME_SYNC, SCENT_TECH_CMD_CONTROL,
+    SCENT_TECH_CMD_READ_TIMERS, SCENT_TECH_CMD_ENQUIRY,
+    SCENT_TECH_CMD_WRITE_TIMER, SCENT_TECH_CMD_PW_QUERY,
+    SCENT_TECH_CMD_PW_SUBMIT, SCENT_TECH_CMD_CAPABILITY,
+    SCENT_TECH_RESP_STATE, SCENT_TECH_RESP_TIMERS,
+    SCENT_TECH_RESP_WRITE_TIMER, SCENT_TECH_RESP_PW_QUERY,
+    SCENT_TECH_RESP_PW_SUBMIT, SCENT_TECH_ACTION_POWER,
+    SCENT_TECH_TIMER_RECORD_SIZE,
     AROMELY_FRAME_HEADER, AROMELY_DIR_WRITE, AROMELY_DIR_NOTIFY,
     AROMELY_TYPE_READ, AROMELY_TYPE_DATA,
     AROMELY_REG_TIME, AROMELY_REG_SCHED_WRITE, AROMELY_REG_FAN,
@@ -128,7 +138,10 @@ class DiffuserState:
     grade_table: list | None = None
     light_on: bool | None = None       # auxiliary LED state
     device_name: str | None = None     # user-set device name (DP 6)
-    password_required: bool | None = None  # GW device demands password auth
+    password_required: bool | None = None  # GW / Scent Tech device demands password auth
+    # Scent Tech: the device's timer records keyed by 1-based slot, as
+    # last read from a 0x88 frame. None until the first read.
+    timer_slots: dict[int, "ScentTechTimer"] | None = None
     firmware_version: str | None = None    # PCB+MCU version string
     # Scent Marketing AK family — spray intensity bundled into schedule
     # writes. Per @Mins95's captures the V2 firmware accepts 0-10 and the
@@ -2146,6 +2159,210 @@ class ScentMarketingGwXorProtocol(ScentMarketingGwProtocol):
 
 
 # ---------------------------------------------------------------------------
+# Scent Tech / ScentLab (YooAI OEM)
+# ---------------------------------------------------------------------------
+# The timer record, frame builder and frame assembler follow @alexlewer's
+# ScentLab BLE integration (github.com/alexlewer/scentlab-ble):
+#
+#   Copyright (c) 2026 Alex Lewer. MIT License. Permission is hereby
+#   granted, free of charge, to any person obtaining a copy of this
+#   software and associated documentation files, to deal in the Software
+#   without restriction, subject to including this notice. THE SOFTWARE
+#   IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+#
+# The 0x21 state push is from @marzliak's live Scent Tech capture (#36).
+
+@dataclass(frozen=True)
+class ScentTechTimer:
+    """One 16-byte Scent Tech timer record.
+
+    Writes send back the whole record with one field changed, so the
+    serial and the server-assigned timer id survive untouched.
+    """
+
+    enabled: bool
+    serial: int
+    weekdays: int          # bit0 Mon … bit6 Sun, bit7 = any day set
+    start_minute: int      # minute of day, 0..1439
+    stop_minute: int
+    run_seconds: int
+    pause_seconds: int
+    timer_id: int
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "ScentTechTimer":
+        if len(data) != SCENT_TECH_TIMER_RECORD_SIZE:
+            raise ValueError(f"expected 16 timer bytes, got {len(data)}")
+        return cls(
+            enabled=data[0] != 0,
+            serial=data[1],
+            weekdays=int.from_bytes(data[2:4], "little"),
+            start_minute=int.from_bytes(data[4:6], "little"),
+            stop_minute=int.from_bytes(data[6:8], "little"),
+            run_seconds=int.from_bytes(data[8:10], "little"),
+            pause_seconds=int.from_bytes(data[10:12], "little"),
+            timer_id=int.from_bytes(data[12:16], "little"),
+        )
+
+    def to_bytes(self) -> bytes:
+        return b"".join((
+            bytes((int(self.enabled), self.serial & 0xFF)),
+            self.weekdays.to_bytes(2, "little"),
+            self.start_minute.to_bytes(2, "little"),
+            self.stop_minute.to_bytes(2, "little"),
+            self.run_seconds.to_bytes(2, "little"),
+            self.pause_seconds.to_bytes(2, "little"),
+            self.timer_id.to_bytes(4, "little"),
+        ))
+
+    def with_changes(self, **changes) -> "ScentTechTimer":
+        return replace(self, **changes)
+
+
+class ScentTechProtocol(BleProtocol):
+    """Scent Tech / ScentLab diffusers ("Scent-<serial>", YooAI OEM).
+
+    Session (mirrors both apps): password-status query 0x47, the
+    password 0x48 if one is configured, enquiry 0x09 01 00, capability
+    query 0x51. Timers are read with 0x08 (-> 0x88, five 16-byte
+    records) and written one record at a time with 0x14 (-> 0x94).
+    """
+
+    device_type = DeviceType.SCENT_TECH
+    service_uuid = SCENT_TECH_SERVICE_UUID
+    write_char_uuid = SCENT_TECH_CHAR_UUID
+    notify_char_uuid = SCENT_TECH_CHAR_UUID
+
+    def __init__(self) -> None:
+        self._rx_buffer = bytearray()
+
+    # -- framing -----------------------------------------------------------
+
+    @staticmethod
+    def _frame(command: int, data: bytes = b"") -> bytes:
+        body = SCENT_TECH_HEADER + bytes((len(data) + 1, command)) + data
+        return body + bytes(((-sum(body)) & 0xFF, SCENT_TECH_TRAILER))
+
+    def _feed(self, data: bytes) -> list[bytes]:
+        """Append a notification and return every complete, valid frame.
+
+        LEN gives the frame size up front, so a reply split across
+        notifications (the 0x88 timer table is 88 bytes) is held until
+        the rest arrives.
+        """
+        self._rx_buffer.extend(data)
+        frames: list[bytes] = []
+        while True:
+            start = self._rx_buffer.find(SCENT_TECH_HEADER)
+            if start < 0:
+                # Keep a lone 0x55 that may be the first header byte.
+                if self._rx_buffer.endswith(SCENT_TECH_HEADER[:1]):
+                    self._rx_buffer[:] = SCENT_TECH_HEADER[:1]
+                else:
+                    self._rx_buffer.clear()
+                return frames
+            del self._rx_buffer[:start]
+            if len(self._rx_buffer) < 3:
+                return frames
+            size = self._rx_buffer[2] + 5
+            if len(self._rx_buffer) < size:
+                return frames
+            frame = bytes(self._rx_buffer[:size])
+            del self._rx_buffer[:size]
+            if frame[-1] != SCENT_TECH_TRAILER or sum(frame[:-1]) & 0xFF:
+                _LOGGER.debug("Scent Tech: dropping invalid frame %s", frame.hex())
+                continue
+            frames.append(frame)
+
+    # -- TX ----------------------------------------------------------------
+
+    def build_power(self, on: bool) -> bytes:
+        return self._frame(
+            SCENT_TECH_CMD_CONTROL,
+            bytes((SCENT_TECH_ACTION_POWER, 0x01 if on else 0x00, 0x00)),
+        )
+
+    def build_query(self) -> bytes:
+        return self._frame(SCENT_TECH_CMD_READ_TIMERS)
+
+    def build_session_frames(self, password: str | None) -> list[bytes]:
+        """Frames that open a session, in the apps' order."""
+        frames = [self._frame(SCENT_TECH_CMD_PW_QUERY)]
+        if password:
+            encoded = password.encode("ascii", errors="replace")[:4]
+            frames.append(self._frame(
+                SCENT_TECH_CMD_PW_SUBMIT, bytes((len(encoded),)) + encoded,
+            ))
+        frames.append(self._frame(SCENT_TECH_CMD_ENQUIRY, b"\x01\x00"))
+        frames.append(self._frame(SCENT_TECH_CMD_CAPABILITY))
+        return frames
+
+    def build_write_timer(self, timer: ScentTechTimer) -> bytes:
+        return self._frame(SCENT_TECH_CMD_WRITE_TIMER, timer.to_bytes())
+
+    def build_time_sync(self, now: datetime | None = None) -> bytes:
+        """Local wall-clock time, encoded as if it were a UTC epoch.
+
+        That is what both apps send, and the firmware compares its timer
+        windows against it. Sending real UTC shifts every window by the
+        UTC offset (@marzliak saw 3 h in São Paulo, #36).
+        """
+        if now is None:
+            try:
+                from homeassistant.util import dt as dt_util
+                now = dt_util.now()
+            except ImportError:
+                now = datetime.now().astimezone()
+        wall = now.replace(tzinfo=timezone.utc)
+        ts = int(wall.timestamp()) & 0xFFFFFFFF
+        return self._frame(SCENT_TECH_CMD_TIME_SYNC, ts.to_bytes(4, "little"))
+
+    # -- RX ----------------------------------------------------------------
+
+    def parse_notification(self, data: bytes) -> dict:
+        result: dict = {}
+        for frame in self._feed(bytes(data)):
+            command = frame[3]
+            payload = frame[4:-2]
+            if command == SCENT_TECH_RESP_TIMERS:
+                timers = self._parse_timers(payload)
+                if timers is not None:
+                    result["timer_slots"] = timers
+            elif command == SCENT_TECH_RESP_STATE and len(payload) > 4:
+                power = bool(payload[4] & 0x01)
+                result["power"] = power
+                result["phase"] = "idle" if power else "off"
+            elif command == SCENT_TECH_RESP_PW_QUERY and payload:
+                result["password_required"] = payload[0] != 0
+            elif command == SCENT_TECH_RESP_PW_SUBMIT and payload:
+                if payload[0] == 0:
+                    _LOGGER.warning("Scent Tech: device rejected the password")
+            elif command == SCENT_TECH_RESP_WRITE_TIMER:
+                result["timer_write_ack"] = True
+        return result
+
+    @staticmethod
+    def _parse_timers(payload: bytes) -> dict[int, ScentTechTimer] | None:
+        """0x88 payload: u16 LE record count, then that many records."""
+        if len(payload) < 2:
+            return None
+        count = int.from_bytes(payload[0:2], "little")
+        size = SCENT_TECH_TIMER_RECORD_SIZE
+        if len(payload) < 2 + count * size:
+            _LOGGER.debug(
+                "Scent Tech: timer frame declares %d records but has %d bytes",
+                count, len(payload),
+            )
+            return None
+        return {
+            index + 1: ScentTechTimer.from_bytes(
+                payload[2 + index * size:2 + (index + 1) * size]
+            )
+            for index in range(count)
+        }
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -2174,6 +2391,8 @@ def get_protocol(
         return ScentMarketingGwXorProtocol(mac=mac, tuya_dp_mode=tuya)
     elif device_type == DeviceType.AROMELY_ARO_MAX:
         return AromelyAroMaxProtocol()
+    elif device_type == DeviceType.SCENT_TECH:
+        return ScentTechProtocol()
     raise ValueError(f"Unknown device type: {device_type}")
 
 

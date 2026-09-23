@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
+from .timer_entity import TIMER_SLOTS, ScentTechTimerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,14 @@ async def async_setup_entry(
     """Set up time entities."""
     device: ScentDiffuserDevice = hass.data[DOMAIN][entry.entry_id]
     if device.device_type == DeviceType.SCENTIMENT:
+        return
+    # Scent Tech has five independent timers instead of one window.
+    if device.device_type == DeviceType.SCENT_TECH:
+        async_add_entities(
+            ScentTechTimerTime(device, slot, field)
+            for slot in TIMER_SLOTS
+            for field in ("start_minute", "stop_minute")
+        )
         return
 
     async_add_entities([
@@ -114,4 +123,30 @@ class DiffuserEndTime(TimeEntity):
             end_minute=value.minute,
             work_seconds=self._device.state.work_seconds or 10,
             pause_seconds=self._device.state.pause_seconds or 120,
+        )
+
+
+class ScentTechTimerTime(ScentTechTimerEntity, TimeEntity):
+    """Start or end time of one Scent Tech timer slot.
+
+    The firmware rejects windows that cross midnight; split those over
+    two slots.
+    """
+
+    def __init__(self, device: ScentDiffuserDevice, slot: int, field: str) -> None:
+        start = field == "start_minute"
+        super().__init__(device, slot, "start" if start else "end", "Start" if start else "End")
+        self._field = field
+        self._attr_icon = "mdi:clock-start" if start else "mdi:clock-end"
+
+    @property
+    def native_value(self) -> time | None:
+        if self.timer is None:
+            return None
+        minute = getattr(self.timer, self._field)
+        return time(minute // 60 % 24, minute % 60)
+
+    async def async_set_value(self, value: time) -> None:
+        await self._device.set_timer_slot(
+            self._slot, **{self._field: value.hour * 60 + value.minute}
         )

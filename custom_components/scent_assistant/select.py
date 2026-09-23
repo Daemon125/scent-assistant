@@ -9,13 +9,39 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, DeviceType
+from .const import DOMAIN, SCENT_TECH_WEEKDAY_ANY, DeviceType
 from .device import ScentDiffuserDevice
+from .timer_entity import TIMER_SLOTS, ScentTechTimerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 MODE_CUSTOM = "Custom"
 MODE_LEVEL = "Level"
+
+# Scent Tech weekday options: the four common patterns first, then every
+# other combination ordered by number of days (after @alexlewer's
+# ScentLab BLE, MIT). Masks are bit0 Mon … bit6 Sun.
+_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_COMMON_DAYS = {
+    0x7F: "Every day",
+    0x1F: "Weekdays (Mon–Fri)",
+    0x60: "Weekends (Sat, Sun)",
+    0x00: "No days",
+}
+
+
+def _day_label(mask: int) -> str:
+    if mask in _COMMON_DAYS:
+        return _COMMON_DAYS[mask]
+    return ", ".join(name for bit, name in enumerate(_DAY_NAMES) if mask & (1 << bit))
+
+
+_DAY_MASKS = tuple(_COMMON_DAYS) + tuple(sorted(
+    (mask for mask in range(0x80) if mask not in _COMMON_DAYS),
+    key=lambda mask: (bin(mask).count("1"), mask),
+))
+DAY_OPTIONS = [_day_label(mask) for mask in _DAY_MASKS]
+_OPTION_TO_MASK = dict(zip(DAY_OPTIONS, _DAY_MASKS))
 
 
 async def async_setup_entry(
@@ -32,6 +58,8 @@ async def async_setup_entry(
     # safe to register for the whole AK family (V2 simply never exposes it).
     if device.device_type == DeviceType.SCENT_MARKETING_AK:
         entities.append(ScheduleModeSelect(device, entry))
+    if device.device_type == DeviceType.SCENT_TECH:
+        entities.extend(ScentTechTimerDays(device, slot) for slot in TIMER_SLOTS)
 
     async_add_entities(entities)
 
@@ -79,3 +107,23 @@ class ScheduleModeSelect(SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await self._device.set_schedule_mode(option == MODE_CUSTOM)
+
+
+class ScentTechTimerDays(ScentTechTimerEntity, SelectEntity):
+    """Weekdays one Scent Tech timer slot runs on."""
+
+    _attr_icon = "mdi:calendar-week"
+    _attr_options = DAY_OPTIONS
+
+    def __init__(self, device: ScentDiffuserDevice, slot: int) -> None:
+        super().__init__(device, slot, "days", "Days")
+
+    @property
+    def current_option(self) -> str | None:
+        return _day_label(self.timer.weekdays & 0x7F) if self.timer else None
+
+    async def async_select_option(self, option: str) -> None:
+        mask = _OPTION_TO_MASK[option]
+        # Bit 7 is the apps' "at least one day selected" marker.
+        weekdays = mask | (SCENT_TECH_WEEKDAY_ANY if mask else 0)
+        await self._device.set_timer_slot(self._slot, weekdays=weekdays)

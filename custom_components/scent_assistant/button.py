@@ -29,6 +29,10 @@ async def async_setup_entry(
     # makes sense on families where power is a plain on/off (Aroma-Link).
     if device.device_type == DeviceType.AROMA_LINK:
         entities.append(MomentaryDiffuseButton(device, entry))
+    # Scent Tech is not polled (every connect beeps), so schedules changed
+    # in the official app only show up after a manual read.
+    if device.device_type == DeviceType.SCENT_TECH:
+        entities.append(RefreshSchedulesButton(device, entry))
     async_add_entities(entities)
 
 
@@ -88,3 +92,25 @@ class TimeSyncButton(ButtonEntity):
             _LOGGER.info("Time synced to %s", self._device.name)
         else:
             _LOGGER.warning("Time sync failed for %s", self._device.name)
+
+
+class RefreshSchedulesButton(ButtonEntity):
+    """Re-read the timer table from a Scent Tech device."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Refresh schedules"
+    _attr_icon = "mdi:refresh"
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_refresh_schedules"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, device.unique_id)},
+        }
+
+    @property
+    def available(self) -> bool:
+        return self._device.connection_mode == "ble"
+
+    async def async_press(self) -> None:
+        await self._device.refresh_state()

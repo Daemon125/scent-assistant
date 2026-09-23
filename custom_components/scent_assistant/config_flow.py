@@ -63,7 +63,7 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_gw_password(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Optional password prompt for Scent Marketing GW devices."""
+        """Optional password prompt for Scent Marketing GW / Scent Tech devices."""
         if user_input is not None:
             pwd = (user_input.get(CONF_GW_PASSWORD) or "").strip()
             # The firmware accepts up to 4 ASCII chars. We trim silently.
@@ -110,12 +110,14 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(address)
                 self._abort_if_unique_id_configured()
 
-                # Scent Marketing GW devices may be password-protected.
-                # We can't tell at scan time, so offer the user a chance
-                # to supply one. AK devices have no such mechanism.
+                # Scent Marketing GW and Scent Tech devices may be
+                # password-protected. We can't tell at scan time, so offer
+                # the user a chance to supply one. AK devices have no such
+                # mechanism.
                 if self._selected_device_type in (
                     DeviceType.SCENT_MARKETING_GW,
                     DeviceType.SCENT_MARKETING_GW_XOR,
+                    DeviceType.SCENT_TECH,
                 ):
                     return await self.async_step_gw_password()
 

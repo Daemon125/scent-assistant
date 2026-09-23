@@ -7,6 +7,7 @@
     { "local_name": "BT-ivy*" },
     { "local_name": "Scentiment*" },
     { "local_name": "SA_*" },
+    { "local_name": "Scent-*" },
     { "manufacturer_id": 22851 },
     { "manufacturer_id": 17932 },
     { "manufacturer_id": 61441 },

@@ -34,12 +34,16 @@ from .protocol_ble import (
     ScentMarketingGwProtocol,
     ScentMarketingGwXorProtocol,
     AromelyAroMaxProtocol,
+    ScentTechProtocol,
     get_protocol,
     detect_device_type,
 )
 from .protocol_cloud import AromaLinkCloudClient
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long to wait for a Scent Tech timer table / write acknowledgement.
+SCENT_TECH_REPLY_TIMEOUT = 4.0
 
 # Disconnect BLE after this many seconds of inactivity
 BLE_IDLE_DISCONNECT_SECONDS = 10
@@ -140,6 +144,13 @@ class ScentDiffuserDevice:
         self.momentary_seconds: int = DEFAULT_MOMENTARY_SECONDS
         self._momentary_task: asyncio.Task | None = None
 
+        # Scent Tech timer writes are read-modify-write on one record, so
+        # they must not interleave; the events let a write wait for the
+        # device's 0x88 table and 0x94 acknowledgement.
+        self._timer_write_lock = asyncio.Lock()
+        self._timers_received = asyncio.Event()
+        self._timer_write_acked = asyncio.Event()
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -205,6 +216,7 @@ class ScentDiffuserDevice:
             DeviceType.SCENT_MARKETING_GW: "Scent Marketing (GW)",
             DeviceType.SCENT_MARKETING_GW_XOR: "Scent Marketing (GW, encrypted)",
             DeviceType.AROMELY_ARO_MAX: "Aromely Aro Max",
+            DeviceType.SCENT_TECH: "Scent Tech / ScentLab",
         }
         base = mapping.get(self._device_type, self._device_type.value)
         # Append the PID when known — different OEMs share the same family
@@ -451,6 +463,24 @@ class ScentDiffuserDevice:
                     except (BleakError, asyncio.TimeoutError, OSError) as err:
                         _LOGGER.warning(
                             "Aromely Aro Max handshake failed on %s: %s",
+                            self._ble_name, err,
+                        )
+                        await self._teardown_ble_client()
+                        self._ble_last_failure_ts = loop.time()
+                        return False
+
+                # Scent Tech / ScentLab — both apps open every session with
+                # a password-status query, the password when one is set,
+                # then an enquiry and a capability query. The device
+                # ignores commands that arrive before that sequence.
+                if isinstance(self._protocol, ScentTechProtocol):
+                    try:
+                        for frame in self._protocol.build_session_frames(self._gw_password):
+                            await self._ble_send(frame)
+                            await asyncio.sleep(0.5 if frame[3] in (0x09, 0x51) else 0.25)
+                    except (BleakError, asyncio.TimeoutError, OSError) as err:
+                        _LOGGER.warning(
+                            "Scent Tech handshake failed on %s: %s",
                             self._ble_name, err,
                         )
                         await self._teardown_ble_client()
@@ -723,6 +753,13 @@ class ScentDiffuserDevice:
         if "schedule_enabled" in updates:
             self._state.schedule_enabled = updates["schedule_enabled"]
             changed = True
+        # Scent Tech timer table / write acknowledgement
+        if "timer_slots" in updates:
+            self._state.timer_slots = updates["timer_slots"]
+            self._timers_received.set()
+            changed = True
+        if updates.get("timer_write_ack"):
+            self._timer_write_acked.set()
 
         # Derive oil days-remaining from the latest oil + schedule state.
         # The 0x50 frame's raw value doesn't match the official app, which
@@ -1132,6 +1169,68 @@ class ScentDiffuserDevice:
             return success
 
         return False
+
+    async def set_timer_slot(self, slot: int, **changes) -> bool:
+        """Change fields of one Scent Tech timer record on the device.
+
+        Reads the table fresh, changes only the given fields of that one
+        record and writes the whole record back, so the serial, timer id
+        and anything the official app set stay intact. Reads the table
+        again afterwards so HA shows what the device actually stored.
+        """
+        if not isinstance(self._protocol, ScentTechProtocol) or not self._ble_address:
+            return False
+        async with self._timer_write_lock:
+            if not await self._ble_connect():
+                return False
+            try:
+                timers = await self._read_scent_tech_timers()
+                if timers is None or slot not in timers:
+                    _LOGGER.warning(
+                        "Scent Tech %s: timer %s not available for writing",
+                        self._ble_name, slot,
+                    )
+                    return False
+                updated = timers[slot].with_changes(**changes)
+                if not (0 <= updated.start_minute <= 1439 and 0 <= updated.stop_minute <= 1439):
+                    _LOGGER.warning("Scent Tech %s: times must be within one day", self._ble_name)
+                    return False
+                if not (0 <= updated.run_seconds <= 0xFFFF and 0 <= updated.pause_seconds <= 0xFFFF):
+                    _LOGGER.warning("Scent Tech %s: duration out of range", self._ble_name)
+                    return False
+                self._timer_write_acked.clear()
+                await self._ble_send(self._protocol.build_write_timer(updated))
+                try:
+                    await asyncio.wait_for(
+                        self._timer_write_acked.wait(), SCENT_TECH_REPLY_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    _LOGGER.debug("Scent Tech %s: no 0x94 for timer %s", self._ble_name, slot)
+                await asyncio.sleep(0.25)
+                if await self._read_scent_tech_timers() is None:
+                    # No read-back: show what we sent rather than the old value.
+                    slots = dict(self._state.timer_slots or {})
+                    slots[slot] = updated
+                    self._state.timer_slots = slots
+                    self._notify_state_changed()
+                return True
+            except (BleakError, asyncio.TimeoutError, OSError) as err:
+                _LOGGER.warning("Scent Tech timer write failed on %s: %s", self._ble_name, err)
+                self._ble_last_failure_ts = asyncio.get_event_loop().time()
+                async with self._ble_lock:
+                    await self._teardown_ble_client(reason="write-failure")
+                return False
+
+    async def _read_scent_tech_timers(self) -> dict | None:
+        """Ask for the timer table and wait for it. Connection must be open."""
+        self._timers_received.clear()
+        await self._ble_send(self._protocol.build_query())
+        try:
+            await asyncio.wait_for(self._timers_received.wait(), SCENT_TECH_REPLY_TIMEOUT)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Scent Tech %s: no timer table received", self._ble_name)
+            return None
+        return self._state.timer_slots
 
     async def async_periodic_refresh(self) -> None:
         """Timer-driven refresh for BLE devices (see BLE_REFRESH_INTERVAL_SECONDS).

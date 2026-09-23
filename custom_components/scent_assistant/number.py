@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_MOMENTARY_SECONDS, DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
+from .timer_entity import TIMER_SLOTS, ScentTechTimerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +26,14 @@ async def async_setup_entry(
 
     if device.device_type == DeviceType.SCENTIMENT:
         async_add_entities([ScentimentLevelNumber(device, entry)])
+        return
+    # Scent Tech has per-slot durations instead of one work/pause pair.
+    if device.device_type == DeviceType.SCENT_TECH:
+        async_add_entities(
+            ScentTechTimerDuration(device, slot, field)
+            for slot in TIMER_SLOTS
+            for field in ("run_seconds", "pause_seconds")
+        )
         return
 
     entities: list[NumberEntity] = [
@@ -238,3 +247,30 @@ class ScentimentLevelNumber(NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.set_level(int(value))
+
+
+class ScentTechTimerDuration(ScentTechTimerEntity, NumberEntity):
+    """Spray or pause duration of one Scent Tech timer slot.
+
+    The apps express intensity purely as this duty cycle; there is no
+    separate level control.
+    """
+
+    _attr_native_unit_of_measurement = "s"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 65535
+    _attr_native_step = 1
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, device: ScentDiffuserDevice, slot: int, field: str) -> None:
+        spray = field == "run_seconds"
+        super().__init__(device, slot, "spray" if spray else "pause", "Spray" if spray else "Pause")
+        self._field = field
+        self._attr_icon = "mdi:spray" if spray else "mdi:timer-pause"
+
+    @property
+    def native_value(self) -> float | None:
+        return float(getattr(self.timer, self._field)) if self.timer else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._device.set_timer_slot(self._slot, **{self._field: int(value)})

@@ -15,6 +15,7 @@ class DeviceType(StrEnum):
     SCENT_MARKETING_GW = "scent_marketing_gw"          # Scent Marketing app, GW family (EE01 service, framed DP protocol)
     SCENT_MARKETING_GW_XOR = "scent_marketing_gw_xor"  # Scent Marketing app, GW family with XOR-encrypted JSON payload
     AROMELY_ARO_MAX = "aromely_aro_max"                # Aromely Aro Max (FFE0 service, 55-framed register protocol)
+    SCENT_TECH = "scent_tech"                          # YooAI OEM, ScentLab / Scent Tech apps (FFE1, 55 AA … 5A frames)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,52 @@ AROMELY_REG_INFO = 0xDB         # device flags (read)
 AROMELY_REG_LABEL = 0xDC        # note/label (read)
 AROMELY_REG_SCHED1 = 0xF1       # schedule slot 1 incl. enabled flag (read)
 AROMELY_REG_SCHED_ALL = 0xF2    # all four schedule slots (read)
+
+# ---------------------------------------------------------------------------
+# Scent Tech / ScentLab (YooAI OEM) — `55 AA LEN CMD DATA… CHK 5A`
+# ---------------------------------------------------------------------------
+# Units advertise as "Scent-<serial>" (Magnifiscent ZenPlug / Grasse Aroma
+# GAH-04P "Scent-B04P…", "Scent-B501F…", unbranded "Scent-BG101W…") and are
+# driven by YooAI's ScentLab (com.yooai.scent.lab) or Scent Tech
+# (com.yooai.scentlife) apps. Protocol from @alexlewer's APK analysis and
+# ScentLab BLE integration (#30, MIT) and @marzliak's live Scent Tech log
+# (#36, 681 frames).
+#
+# One characteristic, FFE1, carries both writes and notifications.
+# LEN counts CMD + DATA; CHK makes the sum of every byte from the first
+# 0x55 through CHK zero mod 256. Integers are little-endian. A reply's
+# command is usually the request's command | 0x80.
+SCENT_TECH_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+SCENT_TECH_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+
+SCENT_TECH_HEADER = b"\x55\xAA"
+SCENT_TECH_TRAILER = 0x5A
+
+SCENT_TECH_CMD_TIME_SYNC = 0x06       # u32 LE local wall clock read as UTC
+SCENT_TECH_CMD_CONTROL = 0x07         # [action, value, 00]
+SCENT_TECH_CMD_READ_TIMERS = 0x08     # -> 0x88
+SCENT_TECH_CMD_ENQUIRY = 0x09         # 01 00, sent after authentication
+SCENT_TECH_CMD_WRITE_TIMER = 0x14     # one 16-byte record -> 0x94
+SCENT_TECH_CMD_PW_QUERY = 0x47        # -> 0xC7, data[0] != 0: password set
+SCENT_TECH_CMD_PW_SUBMIT = 0x48       # 04 + 4 ASCII -> 0xC8, data[0] != 0: ok
+SCENT_TECH_CMD_CAPABILITY = 0x51      # -> 0xD1 identity block
+
+SCENT_TECH_RESP_STATE = 0x21          # pushed state; data[4] bit0 = power
+SCENT_TECH_RESP_TIMERS = 0x88
+SCENT_TECH_RESP_WRITE_TIMER = 0x94
+SCENT_TECH_RESP_PW_QUERY = 0xC7
+SCENT_TECH_RESP_PW_SUBMIT = 0xC8
+
+# Control actions (cmd 0x07). Only power is used: fan and lock are
+# swapped between the two sources (ScentLab APK: fan 0x10 / lock 0x11;
+# Scent Tech live log: fan 0x11 / lock 0x10), so they stay out until a
+# unit confirms which applies to it.
+SCENT_TECH_ACTION_POWER = 0x12
+
+SCENT_TECH_TIMER_RECORD_SIZE = 16
+SCENT_TECH_TIMER_SLOTS = 5
+# Weekday field: bit0 Mon … bit6 Sun, bit7 set whenever any day is.
+SCENT_TECH_WEEKDAY_ANY = 0x80
 
 # AK command opcodes (mirrors com.IAA360.ChengHao.Device.Data.BtDataModel).
 # Negative bytes in the Java source are decoded to their 0..255 equivalents.
@@ -216,6 +263,10 @@ BLE_NAME_PATTERNS = {
     # to the Aroma-Link default, whose FFF1-notify / FFF2-write layout
     # these devices do not have.
     DeviceType.SCENT_MARKETING_AK: ["SA_"],
+    # "Scent-" (hyphen) — Scent Tech / ScentLab units (YooAI OEM). Distinct
+    # from Aroma-Link's "Scent " (space); before this entry they fell
+    # through to the Aroma-Link default and never answered (#30).
+    DeviceType.SCENT_TECH: ["Scent-"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific

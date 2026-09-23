@@ -6,6 +6,7 @@ or debug detection + protocol behaviour is contained here.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -73,6 +74,10 @@ async def async_get_config_entry_diagnostics(
             "device_label": s.device_label,
             "model_code": s.model_code,
             "schedule_enabled": s.schedule_enabled,
+            "timer_slots": (
+                {slot: asdict(timer) for slot, timer in s.timer_slots.items()}
+                if s.timer_slots else None
+            ),
         }
 
     payload: dict[str, Any] = {

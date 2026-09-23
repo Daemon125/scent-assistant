@@ -57,6 +57,8 @@
 
 Most waterless cold-air nebulizing scent/aroma diffusers that use the **Aroma-Link** or **Aroma Buddy** apps should work. These are sold under various brand names on Amazon and AliExpress.
 
+**New, awaiting confirmation:** diffusers that advertise as `Scent-…` and use the **ScentLab** or **Scent Tech** app (YooAI OEM — e.g. Magnifiscent ZenPlug / Grasse Aroma GAH-04P, `Scent-B501F`, unbranded `Scent-BG101W`). Power, all five schedules and time sync are implemented from protocol work by the community; if you own one, a quick test report helps a lot.
+
 > **Have a working device not listed here?** Please [open an issue](https://github.com/mr-sparks/scent-assistant/issues) to let us know!
 
 ---
@@ -165,6 +167,20 @@ The set of entities depends on which device family is connected.
 | Oil remaining | Sensor | Fragrance level percentage (V3 models with an oil sensor) |
 | Oil remaining (ml) / Oil capacity | Sensor | Current and total fragrance volume (V3) |
 | Oil consumption / Oil days remaining | Sensor | Usage rate and estimated days left (V3; days computed in Custom mode) |
+
+### Scent Tech / ScentLab (`Scent-…`)
+
+These diffusers hold five independent schedules; each one gets its own set of entities (N = 1–5).
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| Schedule N | Switch | Schedule enabled |
+| Schedule N Start / End | Time | Daily window (cannot cross midnight — split it over two schedules) |
+| Schedule N Spray / Pause | Number | Spray and pause seconds (this duty cycle is the intensity) |
+| Schedule N Days | Select | Weekdays the schedule runs on |
+| Refresh schedules | Button | Re-read the schedules after changing them in the app |
+
+Every change reads the schedule from the device first and writes back only the field you changed. If the device has a password set in the app, enter it during setup.
 
 ---
 
@@ -303,6 +319,7 @@ This integration was built by reverse engineering the BLE protocols of both devi
 | Tuya BLE (Aroma Buddy) | `55 AA ...` | Sum mod 256 | Power, scheduling (5 setups), time sync |
 | Scent Marketing AK | `8F` login (PIN 8888) + `2A`/`4A` schedule | None (length-framed) | Power, Fan, Program, schedule read-back; V2 + V3 variants |
 | Aromely Aro Max | `55 <dir> <reg> <type> [len payload]` on FFE0/FFE1/FFE2 | Sum mod 256 | Power, fan, daily schedule (work/pause as u16 seconds) |
+| Scent Tech / ScentLab | `55 AA <len> <cmd> … <chk> 5A` on FFE1 (write + notify) | Negated sum | Power, five schedules (16-byte records), time sync, optional password |
 
 ---
 
@@ -315,3 +332,5 @@ Contributions are welcome! If you have a diffuser that uses the Aroma-Link or Ar
 ## &#x1F4DC; License
 
 [MIT](LICENSE)
+
+The Scent Tech / ScentLab support builds on [@alexlewer](https://github.com/alexlewer)'s protocol analysis and [ScentLab BLE](https://github.com/alexlewer/scentlab-ble) integration (MIT, © 2026 Alex Lewer) and on [@marzliak](https://github.com/marzliak)'s live capture of the Scent Tech app.

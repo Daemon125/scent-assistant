@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
+from .timer_entity import TIMER_SLOTS, ScentTechTimerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ async def async_setup_entry(
             # just duplicate Power) — `available` checks `protocol.is_v3`
             # which only resolves after the first BLE login.
             entities.append(DiffuserScheduleSwitch(device, entry))
+
+    if device.device_type == DeviceType.SCENT_TECH:
+        entities.extend(ScentTechTimerSwitch(device, slot) for slot in TIMER_SLOTS)
 
     async_add_entities(entities)
 
@@ -234,3 +238,22 @@ class DiffuserFanSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._device.set_fan(False)
+
+
+class ScentTechTimerSwitch(ScentTechTimerEntity, SwitchEntity):
+    """Enable / disable one Scent Tech timer slot."""
+
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, device: ScentDiffuserDevice, slot: int) -> None:
+        super().__init__(device, slot, "enabled", "")
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.timer.enabled if self.timer else None
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._device.set_timer_slot(self._slot, enabled=True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._device.set_timer_slot(self._slot, enabled=False)
