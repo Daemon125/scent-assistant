@@ -24,6 +24,7 @@ from .const import (
     DEFAULT_PAUSE_DURATION,
     AL_MANY_PUMP_DEVICE_CODES,
     AL_SUB_POWER,
+    AL_SUB_TIME_SYNC,
 )
 from .protocol_ble import (
     BleProtocol,
@@ -56,6 +57,8 @@ BLE_FAILURE_COOLDOWN_SECONDS = 3.0
 # layers its own retries on top of ours, so keeping this low avoids
 # 6-8 rapid connect attempts that can wedge some firmwares.
 BLE_CONNECT_MAX_ATTEMPTS = 2
+# Aroma-Link 0A clock drift from local time that triggers a 57 17 on refresh.
+AL_CLOCK_DRIFT_SECONDS = 120
 # Default run time for the momentary "Diffuse Now" button. Adjustable
 # per device via the Momentary Duration number entity and persisted
 # locally in the config entry options.
@@ -104,6 +107,7 @@ class ScentDiffuserDevice:
         self._ble_has_synced_time = False
         # Sub-command byte of the last NACK reply.
         self._ble_nack: int | None = None
+        self._ble_time_acked = False
         # Monotonic timestamp of the last failed BLE connect/write —
         # used to back off after errors instead of hammering a stuck
         # device (which can wedge a V3 diffuser's GATT stack badly
@@ -765,6 +769,9 @@ class ScentDiffuserDevice:
         if "pause_remaining" in updates:
             self._state.pause_remaining = updates["pause_remaining"]
             changed = True
+        if "device_clock" in updates:
+            self._state.device_clock = updates["device_clock"]
+            changed = True
         for _oil_field in (
             "oil_current_ml", "oil_max_ml",
             "oil_consumption_mlh",
@@ -832,6 +839,8 @@ class ScentDiffuserDevice:
             changed = True
         if updates.get("timer_write_ack"):
             self._timer_write_acked.set()
+        if updates.get("ack") == AL_SUB_TIME_SYNC:
+            self._ble_time_acked = True
 
         # Derive oil days-remaining from the latest oil + schedule state.
         # The 0x50 frame's raw value doesn't match the official app, which
@@ -1400,6 +1409,7 @@ class ScentDiffuserDevice:
         if self._ble_address:
             if await self._ble_connect():
                 try:
+                    clock_before = self._state.device_clock
                     await self._ble_send(self._protocol.build_query())
                     await asyncio.sleep(1.0)
                     # Some protocols expose extra read-registers that the
@@ -1429,6 +1439,20 @@ class ScentDiffuserDevice:
                         if await self._ble_send(week_query()):
                             self._week_query_sent = True
                             await asyncio.sleep(0.3)
+                    # Only a clock parsed in this refresh counts, compared by
+                    # identity; an older one reads as drift.
+                    clock = self._state.device_clock
+                    if (
+                        self._ble_time_acked
+                        and clock is not None
+                        and clock is not clock_before
+                        and abs((datetime.now() - clock).total_seconds()) > AL_CLOCK_DRIFT_SECONDS
+                    ):
+                        _LOGGER.debug(
+                            "Aroma-Link clock on %s reads %s, resyncing",
+                            self._ble_name, clock,
+                        )
+                        await self._ble_send(self._protocol.build_time_sync())
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
                     self._ble_last_failure_ts = asyncio.get_event_loop().time()
@@ -1525,7 +1549,17 @@ class ScentDiffuserDevice:
         if not self._ble_address:
             return False
         self._ble_has_synced_time = False
-        return await self._ble_connect()
+        if not await self._ble_connect():
+            return False
+        # Wait for a handshake in another task; it sends the time frame.
+        async with self._ble_lock:
+            pass
+        if self._ble_has_synced_time:
+            return True
+        # The link was already open, so the connect sent no time frame.
+        frame = self._protocol.build_time_sync()
+        self._ble_has_synced_time = await self._ble_execute(frame)
+        return self._ble_has_synced_time
 
     # ------------------------------------------------------------------
     # Startup / Shutdown
