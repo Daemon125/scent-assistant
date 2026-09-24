@@ -349,10 +349,7 @@ class ScentDiffuserDevice:
 
             try:
                 _LOGGER.debug("BLE connecting to %s", self._ble_name)
-                # Prefer the BLEDevice cached by HA's bluetooth
-                # integration (it carries the right adapter / proxy
-                # routing info); fall back to a plain MAC string if the
-                # device hasn't been observed recently.
+                # Under HA, a MAC string target raises AttributeError.
                 target = self._ble_address
                 if self._hass is not None:
                     cached = bluetooth.async_ble_device_from_address(
@@ -360,6 +357,13 @@ class ScentDiffuserDevice:
                     )
                     if cached is not None:
                         target = cached
+                    else:
+                        _LOGGER.warning(
+                            "BLE connect failed for %s: no connectable adapter or proxy sees it",
+                            self._ble_name,
+                        )
+                        self._ble_last_failure_ts = loop.time()
+                        return False
                 # Use bleak_retry_connector for robust connection
                 # establishment (handles transient failures with
                 # exponential backoff and is required by HA's bluetooth
