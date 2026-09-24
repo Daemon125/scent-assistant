@@ -143,6 +143,8 @@ The set of entities depends on which device family is connected.
 | Diffusion time remaining | Sensor | Seconds left in the current spray phase (Aroma-Link, BLE + Cloud) |
 | Pause time remaining | Sensor | Seconds left in the current pause phase (Aroma-Link, BLE + Cloud) |
 | Battery | Sensor | Battery percentage (Aroma-Link models with a battery) |
+| Radar mode | Sensor | Work mode: app / radar (Aroma-Link models with a radar, BLE only) |
+| Radar level | Sensor | Active radar level: min / low / med / high / max, unknown when no level is active (app mode); each level's detection minutes, people threshold, work and pause seconds as attributes (Aroma-Link models with a radar, BLE only) |
 
 ### Scentiment Diffuser Air 2
 
