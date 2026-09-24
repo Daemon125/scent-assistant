@@ -359,6 +359,13 @@ AL_PHASE_IDLE = 0x00
 AL_PHASE_SPRAYING = 0x01
 AL_PHASE_PAUSED = 0x02
 
+# Work and pause (min, max) seconds by 52 0D hostName (app: dealDeviceMsg).
+AL_DURATION_LIMITS = {
+    "RAD-2": {"work": (5, 120), "pause": (90, 900)},
+    "D-Air_2": {"work": (10, 300), "pause": (10, 300)},
+}
+AL_DURATION_LIMITS_DEFAULT = {"work": (5, 900), "pause": (5, 900)}
+
 # ---------------------------------------------------------------------------
 # Scent Marketing — GW family DP-frame protocol constants
 # ---------------------------------------------------------------------------
