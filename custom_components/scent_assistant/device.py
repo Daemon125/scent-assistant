@@ -262,6 +262,12 @@ class ScentDiffuserDevice:
         return True
 
     @property
+    def supports_battery(self) -> bool:
+        if self._state.has_battery is False:
+            return False
+        return True
+
+    @property
     def protocol_is_v3(self) -> bool:
         """True when the AK protocol has identified the device as V3.
 
