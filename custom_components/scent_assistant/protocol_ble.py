@@ -106,6 +106,13 @@ class DiffuserState:
     has_fan: bool | None = None
     # Same for the battery (0A payload[31]); False skips the sensor.
     has_battery: bool | None = None
+    # Aroma-Link 52/53 0A capability flags; None = not reported.
+    has_weight: bool | None = None
+    has_lamp: bool | None = None
+    has_ota: bool | None = None
+    has_oil_detect: bool | None = None
+    has_oil_percent: bool | None = None
+    has_radar: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -605,6 +612,9 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32] has-fan flag  [33..] more flags
+        #   [34] has-weight flag  [37] has-lamp flag  [39] has-OTA flag
+        #   [41] has-oil-detect flag  [42] has-oil-percent flag
+        #   [43] has-radar flag
         #   [47..48] deviceCode (u16)
         # [10]: low nibble fan, read only when the [32] has-fan flag is set.
         # The on/off byte and work status are plain bytes the app reads
@@ -647,6 +657,18 @@ class AromaLinkBleProtocol(BleProtocol):
             if result.get("has_fan"):
                 # Low nibble here; the app reads 53 03 the other way round.
                 result["fan"] = (payload[10] & 0x0F) == 1
+            if len(payload) >= 35:
+                result["has_weight"] = payload[34] == 1
+            if len(payload) >= 38:
+                result["has_lamp"] = payload[37] == 1
+            if len(payload) >= 40:
+                result["has_ota"] = payload[39] == 1
+            if len(payload) >= 42:
+                result["has_oil_detect"] = payload[41] == 1
+            if len(payload) >= 43:
+                result["has_oil_percent"] = payload[42] == 1
+            if len(payload) >= 44:
+                result["has_radar"] = payload[43] == 1
             if len(payload) >= 49:
                 result["device_code"] = (payload[47] << 8) | payload[48]
             return result
