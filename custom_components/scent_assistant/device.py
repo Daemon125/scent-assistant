@@ -250,6 +250,14 @@ class ScentDiffuserDevice:
         return self._protocol.supports_fan()
 
     @property
+    def supports_oil_percent(self) -> bool:
+        # App oil read order: scale 52 04, else low-oil 52 1D, else 52 1E.
+        s = self._state
+        if s.has_oil_percent is False or s.has_weight or s.has_oil_detect:
+            return False
+        return True
+
+    @property
     def protocol_is_v3(self) -> bool:
         """True when the AK protocol has identified the device as V3.
 
@@ -1266,7 +1274,7 @@ class ScentDiffuserDevice:
                     # device only reports on demand (e.g. Aroma-Link's oil
                     # level). Query them too when the protocol offers one.
                     oil_query = getattr(self._protocol, "build_oil_query", None)
-                    if oil_query is not None:
+                    if oil_query is not None and self.supports_oil_percent:
                         await self._ble_send(oil_query())
                         await asyncio.sleep(0.3)
                     # Configured work/pause durations live in a separate

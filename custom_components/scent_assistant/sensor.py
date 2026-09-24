@@ -48,9 +48,10 @@ async def async_setup_entry(
     # Aroma-Link reports a liquid level via read-register 0x1E and live
     # work/pause countdowns + battery via 0x0A. All of these sensors stay
     # unavailable until a value arrives, so it's safe to register them for
-    # the whole family even though only some models answer the queries.
+    # the whole family, except Oil on units whose 0A flags rule out 52 1E.
     if device.device_type == DeviceType.AROMA_LINK:
-        entities.append(DiffuserOilSensor(device, entry))
+        if device.supports_oil_percent:
+            entities.append(DiffuserOilSensor(device, entry))
         entities.append(DiffuserWorkRemainSensor(device, entry))
         entities.append(DiffuserPauseRemainSensor(device, entry))
         entities.append(DiffuserBatterySensor(device, entry))
