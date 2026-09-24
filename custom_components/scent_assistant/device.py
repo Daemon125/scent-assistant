@@ -686,7 +686,8 @@ class ScentDiffuserDevice:
         if "fan" in updates:
             self._state.fan = updates["fan"]
             changed = True
-        if "phase" in updates:
+        # Aroma-Link 53 09 status 0 reads "idle" even while the unit is off.
+        if "phase" in updates and not (updates["phase"] == "idle" and self._state.power is False):
             self._state.phase = updates["phase"]
             changed = True
         if "work_seconds" in updates:
@@ -859,7 +860,9 @@ class ScentDiffuserDevice:
             cmd = self._protocol.build_power(on)
             if await self._ble_execute(cmd):
                 self._state.power = on
-                self._state.phase = "idle" if on else "off"
+                # A phase the unit already reported wins over an assumed idle.
+                if not on or self._state.phase in ("off", "unknown"):
+                    self._state.phase = "idle" if on else "off"
                 self._notify_state_changed()
                 return True
 
@@ -868,7 +871,8 @@ class ScentDiffuserDevice:
             success = await self._cloud.set_power(self._cloud_device_id, on)
             if success:
                 self._state.power = on
-                self._state.phase = "idle" if on else "off"
+                if not on or self._state.phase in ("off", "unknown"):
+                    self._state.phase = "idle" if on else "off"
                 self._notify_state_changed()
             return success
 
