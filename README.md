@@ -143,7 +143,7 @@ The set of entities depends on which device family is connected.
 | Diffusion time remaining | Sensor | Seconds left in the current spray phase (Aroma-Link, BLE + Cloud) |
 | Pause time remaining | Sensor | Seconds left in the current pause phase (Aroma-Link, BLE + Cloud) |
 | Battery | Sensor | Battery percentage (Aroma-Link models with a battery) |
-| Mode | Select | Work mode: App / Radar (Aroma-Link models with a radar, BLE only) |
+| Mode | Select | Work mode: App / Radar; Start Time / End Time, Work / Pause Duration and `set_schedule` changeable in app mode only (Aroma-Link models with a radar, BLE only) |
 | Radar level | Sensor | Active radar level: min / low / med / high / max, disabled in app mode, unknown when no level is reported; each level's detection minutes, people threshold, work and pause seconds as attributes (Aroma-Link models with a radar, BLE only) |
 | Radar Min / Low / Med / High / Max Work | Number | Spray seconds in that radar level, rising from Min to Max, within the Aroma-Link app's limits for the model, e.g. 5-120 s on the RAD-2; changeable in radar mode only (Aroma-Link models with a radar, BLE only) |
 | Radar Min / Low / Med / High / Max Pause | Number | Pause seconds in that radar level, within the Aroma-Link app's limits for the model, e.g. 90-900 s on the RAD-2; changeable in radar mode only (Aroma-Link models with a radar, BLE only) |
@@ -215,6 +215,8 @@ data:
 | `work_seconds` | No | `10` | Spray duration (5-600 seconds) |
 | `pause_seconds` | No | `120` | Pause between sprays (5-3600 seconds) |
 | `enabled` | No | `true` | Enable or disable the schedule slot |
+
+An Aroma-Link diffuser in radar mode is skipped.
 
 ---
 
