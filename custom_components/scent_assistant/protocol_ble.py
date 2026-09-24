@@ -103,6 +103,14 @@ class DiffuserState:
     # Aroma-Link capability flag from the 0A frame. None = not reported
     # (yet); only an explicit False hides the fan switch.
     has_fan: bool | None = None
+    # Aroma-Link 52/53 0A capability flags; None = not reported.
+    has_battery: bool | None = None
+    has_weight: bool | None = None
+    has_lamp: bool | None = None
+    has_ota: bool | None = None
+    has_oil_detect: bool | None = None
+    has_oil_percent: bool | None = None
+    has_radar: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -562,6 +570,9 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32] has-fan flag  [33..] more flags
+        #   [34] has-weight flag  [37] has-lamp flag  [39] has-OTA flag
+        #   [41] has-oil-detect flag  [42] has-oil-percent flag
+        #   [43] has-radar flag
         # Fan/lamp at [10] are deliberately skipped: the nibble encoding
         # there conflicts with the 0x10 fan value on the 53 03 path. The
         # on/off byte and work status are plain bytes the app reads
@@ -584,10 +595,24 @@ class AromaLinkBleProtocol(BleProtocol):
             # flag is set (mains-only devices report 0 there).
             if len(payload) >= 32 and payload[31] == 1:
                 result["battery"] = max(0, min(100, payload[30]))
+            if len(payload) >= 32:
+                result["has_battery"] = payload[31] != 0
             # The app hides its fan controls when this flag is 0
             # (DeviceControlActivity: hintFan(getHasFan() == 0)).
             if len(payload) >= 33:
                 result["has_fan"] = payload[32] != 0
+            if len(payload) >= 35:
+                result["has_weight"] = payload[34] != 0
+            if len(payload) >= 38:
+                result["has_lamp"] = payload[37] != 0
+            if len(payload) >= 40:
+                result["has_ota"] = payload[39] != 0
+            if len(payload) >= 42:
+                result["has_oil_detect"] = payload[41] != 0
+            if len(payload) >= 43:
+                result["has_oil_percent"] = payload[42] != 0
+            if len(payload) >= 44:
+                result["has_radar"] = payload[43] != 0
             return result
 
         if cmd == AL_CMD_STATUS:

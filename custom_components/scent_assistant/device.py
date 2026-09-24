@@ -695,6 +695,13 @@ class ScentDiffuserDevice:
         if "has_fan" in updates:
             self._state.has_fan = updates["has_fan"]
             changed = True
+        for _flag in (
+            "has_battery", "has_weight", "has_lamp", "has_ota",
+            "has_oil_detect", "has_oil_percent", "has_radar",
+        ):
+            if _flag in updates:
+                setattr(self._state, _flag, updates[_flag])
+                changed = True
         if "rgb_on" in updates:
             self._state.rgb_on = updates["rgb_on"]
             changed = True
