@@ -346,6 +346,13 @@ class ScentDiffuserDevice:
             if self._ble_connected and self._ble_client and self._ble_client.is_connected:
                 self._schedule_disconnect()
                 return True
+            since_failure = loop.time() - self._ble_last_failure_ts
+            if 0 < since_failure < BLE_FAILURE_COOLDOWN_SECONDS:
+                _LOGGER.debug(
+                    "BLE connect to %s skipped after waiting for the lock: within failure cooldown",
+                    self._ble_name,
+                )
+                return False
 
             try:
                 _LOGGER.debug("BLE connecting to %s", self._ble_name)
@@ -1372,6 +1379,18 @@ class ScentDiffuserDevice:
         if self._momentary_task is not None and not self._momentary_task.done():
             return
         try:
+            if (
+                self._hass is not None
+                and not (self._ble_connected and self._ble_client and self._ble_client.is_connected)
+                and not bluetooth.async_scanner_devices_by_address(
+                    self._hass, self._ble_address, connectable=True,
+                )
+            ):
+                _LOGGER.debug(
+                    "Periodic BLE refresh skipped on %s: no connectable adapter or proxy sees it",
+                    self._ble_name,
+                )
+                return
             await self.refresh_state()
         except Exception as err:
             _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
