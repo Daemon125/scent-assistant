@@ -24,6 +24,7 @@ from .const import (
     DEFAULT_PAUSE_DURATION,
     AL_MANY_PUMP_DEVICE_CODES,
     AL_SUB_POWER,
+    AL_SUB_TIME_SYNC,
 )
 from .protocol_ble import (
     BleProtocol,
@@ -56,6 +57,8 @@ BLE_FAILURE_COOLDOWN_SECONDS = 3.0
 # layers its own retries on top of ours, so keeping this low avoids
 # 6-8 rapid connect attempts that can wedge some firmwares.
 BLE_CONNECT_MAX_ATTEMPTS = 2
+# Aroma-Link 0A clock drift from local time that triggers a 57 17 on refresh.
+AL_CLOCK_DRIFT_SECONDS = 120
 # Default run time for the momentary "Diffuse Now" button. Adjustable
 # per device via the Momentary Duration number entity and persisted
 # locally in the config entry options.
@@ -104,6 +107,7 @@ class ScentDiffuserDevice:
         self._ble_has_synced_time = False
         # Sub-command byte of the last NACK reply.
         self._ble_nack: int | None = None
+        self._ble_time_acked = False
         # Monotonic timestamp of the last failed BLE connect/write —
         # used to back off after errors instead of hammering a stuck
         # device (which can wedge a V3 diffuser's GATT stack badly
@@ -346,13 +350,17 @@ class ScentDiffuserDevice:
             if self._ble_connected and self._ble_client and self._ble_client.is_connected:
                 self._schedule_disconnect()
                 return True
+            since_failure = loop.time() - self._ble_last_failure_ts
+            if 0 < since_failure < BLE_FAILURE_COOLDOWN_SECONDS:
+                _LOGGER.debug(
+                    "BLE connect to %s skipped after waiting for the lock: within failure cooldown",
+                    self._ble_name,
+                )
+                return False
 
             try:
                 _LOGGER.debug("BLE connecting to %s", self._ble_name)
-                # Prefer the BLEDevice cached by HA's bluetooth
-                # integration (it carries the right adapter / proxy
-                # routing info); fall back to a plain MAC string if the
-                # device hasn't been observed recently.
+                # Under HA, a MAC string target raises AttributeError.
                 target = self._ble_address
                 if self._hass is not None:
                     cached = bluetooth.async_ble_device_from_address(
@@ -360,6 +368,13 @@ class ScentDiffuserDevice:
                     )
                     if cached is not None:
                         target = cached
+                    else:
+                        _LOGGER.warning(
+                            "BLE connect failed for %s: no connectable adapter or proxy sees it",
+                            self._ble_name,
+                        )
+                        self._ble_last_failure_ts = loop.time()
+                        return False
                 # Use bleak_retry_connector for robust connection
                 # establishment (handles transient failures with
                 # exponential backoff and is required by HA's bluetooth
@@ -371,6 +386,8 @@ class ScentDiffuserDevice:
                     max_attempts=BLE_CONNECT_MAX_ATTEMPTS,
                 )
                 self._ble_connected = True
+                if isinstance(self._protocol, AromaLinkBleProtocol):
+                    self._protocol.reset_rx()
 
                 # Subscribe to notifications for responses. Without these
                 # the AK family can't sync state back to HA, so a silent
@@ -706,7 +723,8 @@ class ScentDiffuserDevice:
         if "fan" in updates:
             self._state.fan = updates["fan"]
             changed = True
-        if "phase" in updates:
+        # Aroma-Link 53 09 status 0 reads "idle" even while the unit is off.
+        if "phase" in updates and not (updates["phase"] == "idle" and self._state.power is False):
             self._state.phase = updates["phase"]
             changed = True
         if "work_seconds" in updates:
@@ -753,6 +771,9 @@ class ScentDiffuserDevice:
             changed = True
         if "pause_remaining" in updates:
             self._state.pause_remaining = updates["pause_remaining"]
+            changed = True
+        if "device_clock" in updates:
+            self._state.device_clock = updates["device_clock"]
             changed = True
         for _oil_field in (
             "oil_current_ml", "oil_max_ml",
@@ -821,6 +842,8 @@ class ScentDiffuserDevice:
             changed = True
         if updates.get("timer_write_ack"):
             self._timer_write_acked.set()
+        if updates.get("ack") == AL_SUB_TIME_SYNC:
+            self._ble_time_acked = True
 
         # Derive oil days-remaining from the latest oil + schedule state.
         # The 0x50 frame's raw value doesn't match the official app, which
@@ -898,7 +921,9 @@ class ScentDiffuserDevice:
             cmd = self._protocol.build_power(on)
             if await self._ble_execute(cmd):
                 self._state.power = on
-                self._state.phase = "idle" if on else "off"
+                # A phase the unit already reported wins over an assumed idle.
+                if not on or self._state.phase in ("off", "unknown"):
+                    self._state.phase = "idle" if on else "off"
                 self._notify_state_changed()
                 return True
 
@@ -907,7 +932,8 @@ class ScentDiffuserDevice:
             success = await self._cloud.set_power(self._cloud_device_id, on)
             if success:
                 self._state.power = on
-                self._state.phase = "idle" if on else "off"
+                if not on or self._state.phase in ("off", "unknown"):
+                    self._state.phase = "idle" if on else "off"
                 self._notify_state_changed()
             return success
 
@@ -1368,6 +1394,18 @@ class ScentDiffuserDevice:
         if self._momentary_task is not None and not self._momentary_task.done():
             return
         try:
+            if (
+                self._hass is not None
+                and not (self._ble_connected and self._ble_client and self._ble_client.is_connected)
+                and not bluetooth.async_scanner_devices_by_address(
+                    self._hass, self._ble_address, connectable=True,
+                )
+            ):
+                _LOGGER.debug(
+                    "Periodic BLE refresh skipped on %s: no connectable adapter or proxy sees it",
+                    self._ble_name,
+                )
+                return
             await self.refresh_state()
         except Exception as err:
             _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
@@ -1377,6 +1415,7 @@ class ScentDiffuserDevice:
         if self._ble_address:
             if await self._ble_connect():
                 try:
+                    clock_before = self._state.device_clock
                     await self._ble_send(self._protocol.build_query())
                     await asyncio.sleep(1.0)
                     # Some protocols expose extra read-registers that the
@@ -1406,6 +1445,20 @@ class ScentDiffuserDevice:
                         if await self._ble_send(week_query()):
                             self._week_query_sent = True
                             await asyncio.sleep(0.3)
+                    # Only a clock parsed in this refresh counts, compared by
+                    # identity; an older one reads as drift.
+                    clock = self._state.device_clock
+                    if (
+                        self._ble_time_acked
+                        and clock is not None
+                        and clock is not clock_before
+                        and abs((datetime.now() - clock).total_seconds()) > AL_CLOCK_DRIFT_SECONDS
+                    ):
+                        _LOGGER.debug(
+                            "Aroma-Link clock on %s reads %s, resyncing",
+                            self._ble_name, clock,
+                        )
+                        await self._ble_send(self._protocol.build_time_sync())
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
                     self._ble_last_failure_ts = asyncio.get_event_loop().time()
@@ -1502,7 +1555,17 @@ class ScentDiffuserDevice:
         if not self._ble_address:
             return False
         self._ble_has_synced_time = False
-        return await self._ble_connect()
+        if not await self._ble_connect():
+            return False
+        # Wait for a handshake in another task; it sends the time frame.
+        async with self._ble_lock:
+            pass
+        if self._ble_has_synced_time:
+            return True
+        # The link was already open, so the connect sent no time frame.
+        frame = self._protocol.build_time_sync()
+        self._ble_has_synced_time = await self._ble_execute(frame)
+        return self._ble_has_synced_time
 
     # ------------------------------------------------------------------
     # Startup / Shutdown

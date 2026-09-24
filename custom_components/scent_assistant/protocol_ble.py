@@ -120,6 +120,8 @@ class DiffuserState:
     # configured durations instead of a countdown.
     work_remaining: int | None = None
     pause_remaining: int | None = None
+    # Aroma-Link 0A bytes 6-12: device clock.
+    device_clock: datetime | None = None
     # Scent Marketing GW-only
     lock: bool | None = None           # child-lock state
     oil_remaining: int | None = None   # percent 0-100
@@ -401,6 +403,8 @@ class AromaLinkBleProtocol(BleProtocol):
         # those three bytes occurring inside the payload. The frame has
         # no length field, so the checksum is the only arbiter.
         self._rx_buffer = bytearray()
+        # Set on a header; then a bare chunk on an empty buffer is a lost tail.
+        self._framed = False
 
     @staticmethod
     def _phase_from_status(status: int, power: bool) -> str:
@@ -536,7 +540,10 @@ class AromaLinkBleProtocol(BleProtocol):
             # A header always starts a new frame; whatever was buffered
             # is a stale partial (device reset mid-frame, missed packet).
             buf.clear()
+            self._framed = True
         elif not buf:
+            if self._framed:
+                return None
             # Unframed data with nothing pending — some firmwares emit
             # bare payloads; hand it through unchanged as before.
             return bytes(data)
@@ -551,6 +558,10 @@ class AromaLinkBleProtocol(BleProtocol):
                 return frame
             # Trailer bytes inside the payload — not the end yet.
         return None
+
+    def reset_rx(self) -> None:
+        """Drop a partial frame left from the previous link."""
+        self._rx_buffer.clear()
 
     def parse_notification(self, data: bytes) -> dict:
         """Parse Aroma-Link notification packets."""
@@ -587,13 +598,21 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32] has-fan flag  [33..] more flags
         #   [47..48] deviceCode (u16)
-        # Fan/lamp at [10] are deliberately skipped: the nibble encoding
-        # there conflicts with the 0x10 fan value on the 53 03 path. The
-        # on/off byte and work status are plain bytes the app reads
+        # [10]: low nibble fan, read only when the [32] has-fan flag is set.
+        # The on/off byte and work status are plain bytes the app reads
         # directly (handlerAllWorkStatus: setOnOff(i+15), setWorkStatus
         # (i+16)), so those are safe and are what keeps the phase honest
         # between pushes — see the 53 09 branch for why that matters.
         if sub == AL_SUB_ALL_WORK_INFO and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            if len(payload) >= 9:
+                try:
+                    result["device_clock"] = datetime(
+                        (payload[2] << 8) | payload[3], payload[4], payload[5],
+                        payload[6], payload[7], payload[8],
+                    )
+                except ValueError:
+                    # An impossible date counts as drift; a new object each read.
+                    result["device_clock"] = datetime(1, 1, 1)
             if len(payload) >= 13:
                 result["power"] = payload[11] == 0x01
                 result["phase"] = self._phase_from_status(payload[12], result["power"])
@@ -615,6 +634,8 @@ class AromaLinkBleProtocol(BleProtocol):
             # (DeviceControlActivity: hintFan(getHasFan() == 0)).
             if len(payload) >= 33:
                 result["has_fan"] = payload[32] != 0
+            if result.get("has_fan"):
+                result["fan"] = (payload[10] & 0x0F) != 0
             if len(payload) >= 49:
                 result["device_code"] = (payload[47] << 8) | payload[48]
             return result
@@ -626,7 +647,7 @@ class AromaLinkBleProtocol(BleProtocol):
                     result["phase"] = "off"
 
             elif sub == AL_SUB_FAN and len(payload) >= 3:
-                result["fan"] = payload[2] == AL_FAN_ON_VALUE
+                result["fan"] = (payload[2] >> 4) != 0
 
             elif sub == AL_SUB_WORK_INFO and len(payload) >= 11:
                 # Work-info push. Per the app's parseWorkInfo():

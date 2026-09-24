@@ -53,6 +53,9 @@ async def async_get_config_entry_diagnostics(
             "grade_table": s.grade_table,
             "work_remaining": s.work_remaining,
             "pause_remaining": s.pause_remaining,
+            "device_clock": (
+                s.device_clock.isoformat() if s.device_clock else None
+            ),
             "lock": s.lock,
             "light_on": s.light_on,
             "device_name": s.device_name,
