@@ -73,7 +73,8 @@ from .const import (
     AL_CMD_QUERY, AL_CMD_STATUS, AL_CMD_WRITE,
     AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC, AL_SUB_DEVICE_INFO,
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
-    AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_SUB_RADAR_SETTINGS, AL_RX_BUFFER_MAX,
+    AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
+    AL_SUB_RADAR_MODE, AL_SUB_RADAR_SETTINGS,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
     AL_SLOT_ENABLED, AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
@@ -445,6 +446,10 @@ class AromaLinkBleProtocol(BleProtocol):
             AL_CMD_WRITE, AL_SUB_FAN,
             AL_FAN_ON_VALUE if on else AL_FAN_OFF_VALUE,
         ]))
+
+    def build_radar_mode(self, radar: bool) -> bytes:
+        """Build the radar mode write (`57 20`, app: setRadarWorkMode)."""
+        return self._build_packet(bytes([AL_CMD_WRITE, AL_SUB_RADAR_MODE, 0x01 if radar else 0x00]))
 
     def build_query(self) -> bytes:
         """Status query: the "all work info" register (52 0A).

@@ -284,6 +284,16 @@ class ScentDiffuserDevice:
         return value
 
     @property
+    def supports_radar(self) -> bool:
+        return self._state.has_radar is True
+
+    @property
+    def radar_present(self) -> bool | None:
+        if self._ble_address and self._state.has_radar is None:
+            return None
+        return self.supports_radar
+
+    @property
     def protocol_is_v3(self) -> bool:
         """True when the AK protocol has identified the device as V3.
 
@@ -954,6 +964,19 @@ class ScentDiffuserDevice:
             cmd = proto.build_fan(on)
             if await self._ble_execute(cmd):
                 self._state.fan = on
+                self._notify_state_changed()
+                return True
+        return False
+
+    async def set_radar_mode(self, radar: bool) -> bool:
+        """Set the app or radar work mode (Aroma-Link)."""
+        if not self._ble_address:
+            return False
+        proto = self._protocol
+        if isinstance(proto, AromaLinkBleProtocol):
+            cmd = proto.build_radar_mode(radar)
+            if await self._ble_execute(cmd):
+                self._state.radar_mode = 1 if radar else 0
                 self._notify_state_changed()
                 return True
         return False
