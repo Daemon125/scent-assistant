@@ -17,6 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MODE_CUSTOM = "Custom"
 MODE_LEVEL = "Level"
+RADAR_MODES = {0: "App", 1: "Radar"}
 
 # Scent Tech weekday options: the four common patterns first, then every
 # other combination ordered by number of days (after @alexlewer's
@@ -60,6 +61,8 @@ async def async_setup_entry(
         entities.append(ScheduleModeSelect(device, entry))
     if device.device_type == DeviceType.SCENT_TECH:
         entities.extend(ScentTechTimerDays(device, slot) for slot in TIMER_SLOTS)
+    if device.device_type == DeviceType.AROMA_LINK and device.supports_radar:
+        entities.append(DiffuserRadarModeSelect(device, entry))
 
     async_add_entities(entities)
 
@@ -107,6 +110,41 @@ class ScheduleModeSelect(SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await self._device.set_schedule_mode(option == MODE_CUSTOM)
+
+
+class DiffuserRadarModeSelect(SelectEntity):
+    """App or radar work mode (Aroma-Link 52 0A, 57 20)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Mode"
+    _attr_icon = "mdi:radar"
+    _attr_options = list(RADAR_MODES.values())
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_radar_mode"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def current_option(self) -> str | None:
+        return RADAR_MODES.get(self._device.state.radar_mode)
+
+    @property
+    def available(self) -> bool:
+        return (
+            self._device.available
+            and self._device.supports_radar
+            and self._device.state.radar_mode is not None
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        await self._device.set_radar_mode(option == RADAR_MODES[1])
 
 
 class ScentTechTimerDays(ScentTechTimerEntity, SelectEntity):

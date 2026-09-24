@@ -18,6 +18,8 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DeviceType,
+    AL_DURATION_LIMITS,
+    AL_DURATION_LIMITS_DEFAULT,
     CLOUD_SCHEDULE_REFRESH_EVERY,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
@@ -115,6 +117,9 @@ class ScentDiffuserDevice:
         # power cycle, per @Mins95's 2026-06-01 report).
         self._ble_last_failure_ts: float = 0.0
         self._device_info_query_sent = False
+        self._radar_query_sent = False
+        # 57 21 rewrites all five levels; interleaved writes lose a change.
+        self._radar_write_lock = asyncio.Lock()
 
         # Device type
         if device_type:
@@ -279,6 +284,14 @@ class ScentDiffuserDevice:
         if self._state.has_battery is False:
             return False
         return True
+
+    @property
+    def supports_radar(self) -> bool:
+        return self._state.has_radar is True
+
+    @property
+    def duration_limits(self) -> dict:
+        return AL_DURATION_LIMITS.get(self._state.model_code, AL_DURATION_LIMITS_DEFAULT)
 
     @property
     def protocol_is_v3(self) -> bool:
@@ -785,6 +798,7 @@ class ScentDiffuserDevice:
         for _flag in (
             "has_battery", "has_weight", "has_lamp", "has_ota",
             "has_oil_detect", "has_oil_percent", "has_radar",
+            "radar_mode", "radar_level", "radar_settings",
         ):
             if _flag in updates:
                 setattr(self._state, _flag, updates[_flag])
@@ -1024,6 +1038,80 @@ class ScentDiffuserDevice:
                 return True
         return False
 
+    async def set_radar_mode(self, radar: bool) -> bool:
+        """Set the app or radar work mode (Aroma-Link)."""
+        if not self._ble_address:
+            return False
+        proto = self._protocol
+        if isinstance(proto, AromaLinkBleProtocol):
+            cmd = proto.build_radar_mode(radar)
+            if await self._ble_execute(cmd):
+                self._state.radar_mode = 1 if radar else 0
+                self._notify_state_changed()
+                return True
+        return False
+
+    async def set_radar_level_times(
+        self, level: int, work: int | None = None, pause: int | None = None,
+    ) -> bool:
+        """Set the work and pause seconds of one radar level (Aroma-Link)."""
+        proto = self._protocol
+        if not isinstance(proto, AromaLinkBleProtocol) or not self._ble_address:
+            return False
+        async with self._radar_write_lock:
+            settings = self._state.radar_settings
+            if not settings or not 1 <= level <= len(settings):
+                _LOGGER.warning(
+                    "Aroma-Link %s: radar level %s settings not known",
+                    self._ble_name, level,
+                )
+                return False
+            if self._state.radar_mode != 1:
+                _LOGGER.warning(
+                    "Aroma-Link %s: radar levels can be changed only in radar mode",
+                    self._ble_name,
+                )
+                return False
+            minutes, people, old_work, old_pause = settings[level - 1]
+            new = list(settings)
+            new[level - 1] = (
+                minutes, people,
+                old_work if work is None else work,
+                old_pause if pause is None else pause,
+            )
+            work_min, work_max = self.duration_limits["work"]
+            pause_min, pause_max = self.duration_limits["pause"]
+            if not all(
+                work_min <= w <= work_max and pause_min <= p <= pause_max
+                for _, _, w, p in new
+            ):
+                _LOGGER.warning(
+                    "Aroma-Link %s: radar work must be %s-%s s and pause %s-%s s",
+                    self._ble_name, work_min, work_max, pause_min, pause_max,
+                )
+                return False
+            work_by_level = [r[2] for r in new]
+            people_by_level = [r[1] for r in new]
+            if not all(a < b for a, b in zip(work_by_level, work_by_level[1:])):
+                _LOGGER.warning(
+                    "Aroma-Link %s: radar work seconds must rise from Min to Max",
+                    self._ble_name,
+                )
+                return False
+            if not all(a < b for a, b in zip([0] + people_by_level, people_by_level)):
+                _LOGGER.warning(
+                    "Aroma-Link %s: radar people must rise from Min to Max",
+                    self._ble_name,
+                )
+                return False
+            if await self._ble_execute(proto.build_radar_settings(new)):
+                self._state.radar_settings = new
+                # State is optimistic until the next 52 21 read.
+                self._radar_query_sent = False
+                self._notify_state_changed()
+                return True
+            return False
+
     async def set_lock(self, on: bool) -> bool:
         """Toggle child-lock (Scent Marketing AK + GW + GW-XOR)."""
         if not self._ble_address:
@@ -1157,6 +1245,16 @@ class ScentDiffuserDevice:
             return await self._write_schedule_to_device(custom_mode=custom)
         return True
 
+    def _radar_blocks_schedule(self) -> bool:
+        """Warn and return True while an Aroma-Link unit is in radar mode."""
+        if not (self.supports_radar and self._state.radar_mode == 1):
+            return False
+        _LOGGER.warning(
+            "Schedule write skipped on %s: radar mode active, switch Mode to app first",
+            self._ble_name,
+        )
+        return True
+
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
         if not (self.schedule_window_read and self.schedule_durations_read):
@@ -1164,6 +1262,8 @@ class ScentDiffuserDevice:
                 "Schedule write skipped on %s: schedule not read from device yet",
                 self._ble_name,
             )
+            return False
+        if self._radar_blocks_schedule():
             return False
         previous = self._state.work_seconds
         self._state.work_seconds = seconds
@@ -1181,6 +1281,8 @@ class ScentDiffuserDevice:
                 "Schedule write skipped on %s: schedule not read from device yet",
                 self._ble_name,
             )
+            return False
+        if self._radar_blocks_schedule():
             return False
         previous = self._state.pause_seconds
         self._state.pause_seconds = seconds
@@ -1202,6 +1304,8 @@ class ScentDiffuserDevice:
         enabled: bool | None = None,
     ) -> bool:
         """Set a full schedule on the device."""
+        if self._radar_blocks_schedule():
+            return False
         kept = {
             field: getattr(self._state, field) for field in (
                 "start_hour", "start_minute", "end_hour", "end_minute",
@@ -1470,6 +1574,15 @@ class ScentDiffuserDevice:
                     if oil_query is not None and self.supports_oil_percent:
                         await self._ble_send(oil_query())
                         await asyncio.sleep(0.3)
+                    radar_query = getattr(self._protocol, "build_radar_query", None)
+                    if (
+                        radar_query is not None
+                        and self._state.has_radar
+                        and (not self._radar_query_sent or self._state.radar_settings is None)
+                    ):
+                        if await self._ble_send(radar_query()):
+                            self._radar_query_sent = True
+                            await asyncio.sleep(0.3)
                     # Configured work/pause durations live in a separate
                     # per-weekday register on Aroma-Link (the status frame
                     # only carries the *remaining* times). We write every
