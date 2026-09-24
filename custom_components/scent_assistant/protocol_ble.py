@@ -71,7 +71,7 @@ from .const import (
     TUYA_DP_POWER, TUYA_DP_SCHEDULE,
     AL_HEADER, AL_TRAILER,
     AL_CMD_QUERY, AL_CMD_STATUS, AL_CMD_WRITE,
-    AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC,
+    AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC, AL_SUB_DEVICE_INFO,
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
     AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
@@ -150,7 +150,8 @@ class DiffuserState:
     # Scent Tech: the device's timer records keyed by 1-based slot, as
     # last read from a 0x88 frame. None until the first read.
     timer_slots: dict[int, "ScentTechTimer"] | None = None
-    firmware_version: str | None = None    # PCB+MCU version string
+    # AK/GW firmware version; Aroma-Link 52 0D bleVersion.
+    firmware_version: str | None = None
     # Scent Marketing AK family — spray intensity bundled into schedule
     # writes. Per @Mins95's captures the V2 firmware accepts 0-10 and the
     # V3 firmware accepts 0-20; we clamp on send and let the AK protocol
@@ -169,8 +170,7 @@ class DiffuserState:
     # V3-only "scene label" the user assigned via the official app
     # (e.g. "Evasion"). Surfaced in the device info on read-back.
     device_label: str | None = None
-    # V3-only model code (e.g. "A305M"). Useful for triage when
-    # different hardware variants reveal protocol quirks.
+    # AK V3 model code (e.g. "A305M"); Aroma-Link 52 0D hostName.
     model_code: str | None = None
     # Whether the device's active program/schedule is currently set to
     # run. Distinct from `power` on V3 — a V3 diffuser can be powered
@@ -456,6 +456,10 @@ class AromaLinkBleProtocol(BleProtocol):
         """
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_WORK_FREQUENCY, weekday & 0xFF]))
 
+    def build_device_info_query(self) -> bytes:
+        """Build the device info query (`52 0D`, app: getDeviceInfoPack)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_DEVICE_INFO]))
+
     def build_oil_query(self) -> bytes:
         """Read the liquid/oil level register (`52 1E`).
 
@@ -517,6 +521,19 @@ class AromaLinkBleProtocol(BleProtocol):
 
     def supports_fan(self) -> bool:
         return True
+
+    def ring_hex(self, data: bytes) -> str:
+        """Return ring hex with a 52 0D IMEI masked; call before parsing."""
+        info = bytes([AL_CMD_QUERY, AL_SUB_DEVICE_INFO])
+        keep = len(data)
+        if data[:3] == AL_HEADER:
+            if data[4:6] == info:
+                # IMEI: frame bytes 48-62.
+                keep = 48
+        elif self._rx_buffer and (self._rx_buffer + data)[4:6] == info:
+            # Masked whole: offsets are unknown after a lost chunk.
+            keep = 0
+        return data[:keep].hex() + "xx" * len(data[keep:])
 
     def _feed(self, data: bytes) -> bytes | None:
         """Accumulate one notification; return a complete, checksum-valid frame or None."""
@@ -641,6 +658,20 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["start_minute"] = payload[8]
                 result["end_hour"] = payload[9]
                 result["end_minute"] = payload[10]
+
+        elif cmd == AL_CMD_QUERY and sub == AL_SUB_DEVICE_INFO and len(payload) >= 42:
+            # `52 0D <hostName 20> <bleVersion 20> <caps> <netType> <IMEI 15>`
+            host = payload[2:22].replace(b"\x00", b"").decode("utf-8", errors="replace").strip()
+            version = payload[22:42].replace(b"\x00", b"").decode("utf-8", errors="replace").strip()
+            if host:
+                result["model_code"] = host
+            if version:
+                result["firmware_version"] = version
+            # Frame hex with the IMEI masked, for the diagnostics ring.
+            masked = payload[:44].hex() + "xx" * len(payload[44:59]) + payload[59:].hex()
+            if len(frame) > len(payload):
+                masked = frame[:4].hex() + masked + frame[-3:].hex()
+            result["masked_frame_hex"] = masked
 
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_WORK_FREQUENCY and len(payload) >= 8:
             # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <level<<4|enabled>`
