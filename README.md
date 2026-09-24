@@ -151,6 +151,8 @@ The set of entities depends on which device family is connected.
 | Battery | Sensor | Battery percentage (Aroma-Link models with a battery) |
 | Mode | Select | Work mode: App / Radar (Aroma-Link models with a radar, BLE only) |
 | Radar level | Sensor | Active radar level: min / low / med / high / max, or disabled in app mode; every level's settings and the active level's values as attributes (Aroma-Link models with a radar, BLE only) |
+| Radar 1 Min / 2 Low / 3 Med / 4 High / 5 Max Work | Number | Spray seconds in that radar level, rising from Min to Max, within the Aroma-Link app's limits for the model, e.g. 5-120 s on the Rad-2; unavailable outside radar mode (Aroma-Link models with a radar, BLE only) |
+| Radar 1 Min / 2 Low / 3 Med / 4 High / 5 Max Pause | Number | Pause seconds in that radar level, within the Aroma-Link app's limits for the model, e.g. 90-900 s on the Rad-2; unavailable outside radar mode (Aroma-Link models with a radar, BLE only) |
 
 ### Scentiment Diffuser Air 2 / Mini 2
 
