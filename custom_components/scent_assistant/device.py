@@ -363,6 +363,8 @@ class ScentDiffuserDevice:
                     max_attempts=BLE_CONNECT_MAX_ATTEMPTS,
                 )
                 self._ble_connected = True
+                if isinstance(self._protocol, AromaLinkBleProtocol):
+                    self._protocol.reset_rx()
 
                 # Subscribe to notifications for responses. Without these
                 # the AK family can't sync state back to HA, so a silent

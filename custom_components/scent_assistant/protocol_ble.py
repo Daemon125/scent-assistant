@@ -396,6 +396,8 @@ class AromaLinkBleProtocol(BleProtocol):
         # those three bytes occurring inside the payload. The frame has
         # no length field, so the checksum is the only arbiter.
         self._rx_buffer = bytearray()
+        # Set on a header; then a bare chunk on an empty buffer is a lost tail.
+        self._framed = False
 
     @staticmethod
     def _phase_from_status(status: int, power: bool) -> str:
@@ -519,7 +521,10 @@ class AromaLinkBleProtocol(BleProtocol):
             # A header always starts a new frame; whatever was buffered
             # is a stale partial (device reset mid-frame, missed packet).
             buf.clear()
+            self._framed = True
         elif not buf:
+            if self._framed:
+                return None
             # Unframed data with nothing pending — some firmwares emit
             # bare payloads; hand it through unchanged as before.
             return bytes(data)
@@ -534,6 +539,10 @@ class AromaLinkBleProtocol(BleProtocol):
                 return frame
             # Trailer bytes inside the payload — not the end yet.
         return None
+
+    def reset_rx(self) -> None:
+        """Drop a partial frame left from the previous link."""
+        self._rx_buffer.clear()
 
     def parse_notification(self, data: bytes) -> dict:
         """Parse Aroma-Link notification packets."""
