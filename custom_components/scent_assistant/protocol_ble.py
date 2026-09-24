@@ -589,9 +589,8 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32] has-fan flag  [33..] more flags
         #   [47..48] deviceCode (u16)
-        # Fan/lamp at [10] are deliberately skipped: the nibble encoding
-        # there conflicts with the 0x10 fan value on the 53 03 path. The
-        # on/off byte and work status are plain bytes the app reads
+        # [10]: low nibble fan, read only when the [32] has-fan flag is set.
+        # The on/off byte and work status are plain bytes the app reads
         # directly (handlerAllWorkStatus: setOnOff(i+15), setWorkStatus
         # (i+16)), so those are safe and are what keeps the phase honest
         # between pushes — see the 53 09 branch for why that matters.
@@ -626,6 +625,8 @@ class AromaLinkBleProtocol(BleProtocol):
             # (DeviceControlActivity: hintFan(getHasFan() == 0)).
             if len(payload) >= 33:
                 result["has_fan"] = payload[32] != 0
+            if result.get("has_fan"):
+                result["fan"] = (payload[10] & 0x0F) != 0
             if len(payload) >= 49:
                 result["device_code"] = (payload[47] << 8) | payload[48]
             return result
@@ -637,7 +638,7 @@ class AromaLinkBleProtocol(BleProtocol):
                     result["phase"] = "off"
 
             elif sub == AL_SUB_FAN and len(payload) >= 3:
-                result["fan"] = payload[2] == AL_FAN_ON_VALUE
+                result["fan"] = (payload[2] >> 4) != 0
 
             elif sub == AL_SUB_WORK_INFO and len(payload) >= 11:
                 # Work-info push. Per the app's parseWorkInfo():
