@@ -128,6 +128,7 @@ class ScentDiffuserDevice:
         # power cycle, per @Mins95's 2026-06-01 report).
         self._ble_last_failure_ts: float = 0.0
         self._device_info_query_sent = False
+        self._radar_query_sent = False
 
         # Device type
         if device_type:
@@ -942,6 +943,7 @@ class ScentDiffuserDevice:
         for _flag in (
             "has_weight", "has_lamp", "has_ota",
             "has_oil_detect", "has_oil_percent", "oil_low",
+            "has_radar", "radar_mode", "radar_level", "radar_settings",
         ):
             if _flag in updates:
                 setattr(self._state, _flag, updates[_flag])
@@ -1712,6 +1714,15 @@ class ScentDiffuserDevice:
                     if detect_query is not None and self.supports_oil_detect:
                         await self._ble_send(detect_query())
                         await asyncio.sleep(0.3)
+                    radar_query = getattr(self._protocol, "build_radar_query", None)
+                    if (
+                        radar_query is not None
+                        and self._state.has_radar
+                        and (not self._radar_query_sent or self._state.radar_settings is None)
+                    ):
+                        if await self._ble_send(radar_query()):
+                            self._radar_query_sent = True
+                            await asyncio.sleep(0.3)
                     # Configured work/pause durations live in a separate
                     # per-weekday register on Aroma-Link (the status frame
                     # only carries the *remaining* times). We write every
