@@ -120,6 +120,8 @@ class DiffuserState:
     # configured durations instead of a countdown.
     work_remaining: int | None = None
     pause_remaining: int | None = None
+    # Aroma-Link 0A bytes 6-12: device clock.
+    device_clock: datetime | None = None
     # Scent Marketing GW-only
     lock: bool | None = None           # child-lock state
     oil_remaining: int | None = None   # percent 0-100
@@ -569,6 +571,15 @@ class AromaLinkBleProtocol(BleProtocol):
         # (i+16)), so those are safe and are what keeps the phase honest
         # between pushes — see the 53 09 branch for why that matters.
         if sub == AL_SUB_ALL_WORK_INFO and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            if len(payload) >= 9:
+                try:
+                    result["device_clock"] = datetime(
+                        (payload[2] << 8) | payload[3], payload[4], payload[5],
+                        payload[6], payload[7], payload[8],
+                    )
+                except ValueError:
+                    # An impossible date counts as drift; a new object each read.
+                    result["device_clock"] = datetime(1, 1, 1)
             if len(payload) >= 13:
                 result["power"] = payload[11] == 0x01
                 result["phase"] = self._phase_from_status(payload[12], result["power"])
