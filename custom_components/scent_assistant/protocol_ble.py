@@ -445,6 +445,17 @@ class AromaLinkBleProtocol(BleProtocol):
         """Build the radar mode write (`57 20`, app: setRadarWorkMode)."""
         return self._build_packet(bytes([AL_CMD_WRITE, AL_SUB_RADAR_MODE, 0x01 if radar else 0x00]))
 
+    def build_radar_settings(self, settings: list) -> bytes:
+        """Build `57 21` radar settings (app: getSetRadarSettingPack)."""
+        data = bytearray([AL_CMD_WRITE, AL_SUB_RADAR_SETTINGS])
+        for minutes, people, work, pause in settings:
+            data.extend([
+                minutes & 0xFF, people & 0xFF,
+                (work >> 8) & 0xFF, work & 0xFF,
+                (pause >> 8) & 0xFF, pause & 0xFF,
+            ])
+        return self._build_packet(bytes(data))
+
     def build_query(self) -> bytes:
         """Status query: the "all work info" register (52 0A).
 
