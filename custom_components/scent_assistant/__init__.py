@@ -258,6 +258,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         dev.name,
                     )
                     continue
+                elif dev.radar_mode_active:
+                    _LOGGER.warning(
+                        "Schedule write skipped on %s: radar mode active, switch Mode to app first",
+                        dev.name,
+                    )
+                    continue
                 else:
                     s = dev.state
                     data = {

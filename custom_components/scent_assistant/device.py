@@ -379,6 +379,14 @@ class ScentDiffuserDevice:
                 "Try again once the device has been reachable for a moment."
             )
 
+    def require_app_mode(self) -> None:
+        """Refuse a schedule edit while an Aroma-Link unit is in radar mode."""
+        if self.radar_mode_active:
+            raise HomeAssistantError(
+                f"{self._ble_name}: the unit is in radar mode, which doesn't "
+                "use the schedule. Switch Mode to App first."
+            )
+
     @property
     def supports_cloud(self) -> bool:
         return self._cloud is not None and self._cloud_device_id is not None
@@ -1346,6 +1354,7 @@ class ScentDiffuserDevice:
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
         self.require_schedule_read()
+        self.require_app_mode()
         previous = self._state.work_seconds
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
@@ -1358,6 +1367,7 @@ class ScentDiffuserDevice:
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
         self.require_schedule_read()
+        self.require_app_mode()
         previous = self._state.pause_seconds
         self._state.pause_seconds = seconds
         if await self._write_schedule_to_device(custom_mode=True):
