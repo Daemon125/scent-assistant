@@ -1159,14 +1159,28 @@ class ScentDiffuserDevice:
             return await self._write_schedule_to_device(custom_mode=custom)
         return True
 
+    def _radar_blocks_schedule(self) -> bool:
+        """Warn and return True while an Aroma-Link unit is in radar mode."""
+        if not self.radar_mode_active:
+            return False
+        _LOGGER.warning(
+            "Schedule write skipped on %s: radar mode active, switch Mode to app first",
+            self._ble_name,
+        )
+        return True
+
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
+        if self._radar_blocks_schedule():
+            return False
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
         return await self._write_schedule_to_device(custom_mode=True)
 
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
+        if self._radar_blocks_schedule():
+            return False
         self._state.pause_seconds = seconds
         return await self._write_schedule_to_device(custom_mode=True)
 
@@ -1182,6 +1196,8 @@ class ScentDiffuserDevice:
         enabled: bool = True,
     ) -> bool:
         """Set a full schedule on the device."""
+        if self._radar_blocks_schedule():
+            return False
         self._state.work_seconds = work_seconds
         self._state.pause_seconds = pause_seconds
         self._state.start_hour = start_hour

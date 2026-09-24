@@ -86,7 +86,7 @@ class WorkDurationNumber(NumberEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and not self._device.radar_mode_active
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.set_work_duration(int(value))
@@ -123,7 +123,7 @@ class PauseDurationNumber(NumberEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and not self._device.radar_mode_active
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.set_pause_duration(int(value))
