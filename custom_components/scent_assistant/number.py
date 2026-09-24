@@ -15,6 +15,8 @@ from .timer_entity import TIMER_SLOTS, ScentTechTimerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+RADAR_LEVEL_NAMES = {1: "Min", 2: "Low", 3: "Med", 4: "High", 5: "Max"}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -44,6 +46,12 @@ async def async_setup_entry(
         entities.append(ScentMarketingIntensityNumber(device, entry))
     if device.device_type == DeviceType.AROMA_LINK:
         entities.append(MomentaryDurationNumber(device, entry))
+        if device.supports_radar:
+            entities.extend(
+                DiffuserRadarTimeNumber(device, entry, level, field)
+                for level in RADAR_LEVEL_NAMES
+                for field in ("work", "pause")
+            )
     async_add_entities(entities)
 
 
@@ -169,6 +177,61 @@ class MomentaryDurationNumber(NumberEntity):
         self._device.momentary_seconds = int(value)
         if self.hass is not None:
             self.async_write_ha_state()
+
+
+class DiffuserRadarTimeNumber(NumberEntity):
+    """Work or pause seconds of one radar level (Aroma-Link 52 21, 57 21)."""
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "s"
+    _attr_native_step = 1
+    _attr_mode = NumberMode.BOX
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self, device: ScentDiffuserDevice, entry: ConfigEntry, level: int, field: str,
+    ) -> None:
+        self._device = device
+        self._level = level
+        self._field = field
+        self._attr_name = f"Radar {level} {RADAR_LEVEL_NAMES[level]} {field.capitalize()}"
+        self._attr_icon = "mdi:timer" if field == "work" else "mdi:timer-pause"
+        self._attr_unique_id = f"{device.unique_id}_radar_{level}_{field}"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, device.unique_id)},
+        }
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        settings = self._device.state.radar_settings
+        if not settings:
+            return None
+        return settings[self._level - 1][2 if self._field == "work" else 3]
+
+    @property
+    def native_min_value(self) -> float:
+        return self._device.duration_limits[self._field][0]
+
+    @property
+    def native_max_value(self) -> float:
+        return self._device.duration_limits[self._field][1]
+
+    @property
+    def available(self) -> bool:
+        return (
+            self._device.available
+            and self._device.radar_mode_active
+            and self._device.state.radar_settings is not None
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._device.set_radar_level_times(self._level, **{self._field: int(value)})
 
 
 class ScentMarketingIntensityNumber(NumberEntity):
