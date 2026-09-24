@@ -269,6 +269,10 @@ class ScentDiffuserDevice:
         return True
 
     @property
+    def supports_radar(self) -> bool:
+        return self._state.has_radar is True
+
+    @property
     def protocol_is_v3(self) -> bool:
         """True when the AK protocol has identified the device as V3.
 
