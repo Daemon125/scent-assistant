@@ -113,6 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cloud_device_id=cloud_device_id,
         sm_metadata=entry.data.get("sm_metadata"),
         gw_password=entry.data.get("gw_password"),
+        entry_id=entry.entry_id,
     )
 
     # Restore local configuration before setting up the device and platforms.
