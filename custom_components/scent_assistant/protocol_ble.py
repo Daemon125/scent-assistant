@@ -77,6 +77,7 @@ from .const import (
     AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC, AL_SUB_DEVICE_INFO,
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
     AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
+    AL_SUB_OIL_DETECT,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
     AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
@@ -114,6 +115,8 @@ class DiffuserState:
     has_ota: bool | None = None
     has_oil_detect: bool | None = None
     has_oil_percent: bool | None = None
+    # Aroma-Link 52/53 1D: True where the app shows "oil insufficient".
+    oil_low: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -501,6 +504,10 @@ class AromaLinkBleProtocol(BleProtocol):
         """
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_LEVEL]))
 
+    def build_oil_detect_query(self) -> bytes:
+        """Build the low-oil query (`52 1D`, app: getOjiDetectPackByDetection)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_DETECT]))
+
     def build_week_schedule_query(self) -> bytes:
         """Build READ_WEEK_WORK_TIME (`52 15`, app: getAllWorkTimePack)."""
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_QUERY_SCHEDULES]))
@@ -696,6 +703,12 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["has_oil_percent"] = payload[42] == 1
             if len(payload) >= 49:
                 result["device_code"] = (payload[47] << 8) | payload[48]
+            return result
+
+        if sub == AL_SUB_OIL_DETECT and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            # `52/53 1D <flag>` (app: lowOjiWarn)
+            if len(payload) >= 3:
+                result["oil_low"] = {0: False, 1: True}.get(payload[2])
             return result
 
         if cmd == AL_CMD_STATUS:
