@@ -102,7 +102,7 @@ class DiffuserState:
     power: bool | None = None
     fan: bool | None = None            # Aroma-Link only
     # Aroma-Link capability flag from the 0A frame. None = not reported
-    # (yet); only an explicit False hides the fan switch.
+    # (yet); False hides the fan switch.
     has_fan: bool | None = None
     # Same for the battery (0A payload[31]); False skips the sensor.
     has_battery: bool | None = None
@@ -420,6 +420,12 @@ class AromaLinkBleProtocol(BleProtocol):
         self._rx_buffer = bytearray()
         # Set on a header; then a bare chunk on an empty buffer is a lost tail.
         self._framed = False
+        self._status_seen = False
+
+    @property
+    def status_seen(self) -> bool:
+        """True once a 52/53 0A frame has been parsed."""
+        return self._status_seen
 
     @staticmethod
     def _phase_from_status(status: int, power: bool) -> str:
@@ -642,6 +648,7 @@ class AromaLinkBleProtocol(BleProtocol):
         # (i+16)), so those are safe and are what keeps the phase honest
         # between pushes — see the 53 09 branch for why that matters.
         if sub == AL_SUB_ALL_WORK_INFO and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            self._status_seen = True
             if len(payload) >= 9:
                 try:
                     result["device_clock"] = datetime(
