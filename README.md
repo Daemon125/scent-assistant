@@ -59,6 +59,8 @@
 
 Most waterless cold-air nebulizing scent/aroma diffusers that use the **Aroma-Link** or **Aroma Buddy** apps should work. These are sold under various brand names on Amazon and AliExpress.
 
+Diffusers whose Bluetooth name has the form `<name>.<code>.<suffix>`, with a code from `A0` to `A8` (for example `Kitchen.A5.WIFI`), are discovered automatically when they advertise the Aroma-Link VER data, and are marked ✓ in the Bluetooth scan otherwise.
+
 **New, awaiting confirmation:** diffusers that advertise as `Scent-…` and use the **ScentLab** or **Scent Tech** app (YooAI OEM — e.g. Magnifiscent ZenPlug / Grasse Aroma GAH-04P, `Scent-B501F`, unbranded `Scent-BG101W`). Power, all five schedules and time sync are implemented from protocol work by the community; if you own one, a quick test report helps a lot.
 
 > **Have a working device not listed here?** Please [open an issue](https://github.com/mr-sparks/scent-assistant/issues) to let us know!
