@@ -20,10 +20,12 @@ from .const import (
     CONF_CLOUD_USER_ID,
     CONF_CONNECTION_MODE,
     CONF_GW_PASSWORD,
+    CONF_REFRESH_INTERVAL,
+    BLE_REFRESH_INTERVAL_SECONDS,
     DEFAULT_SCAN_TIMEOUT,
     DeviceType,
 )
-from .protocol_ble import detect_device_type, extract_scent_marketing_metadata
+from .protocol_ble import detect_device_type, extract_scent_marketing_metadata, get_protocol
 from .protocol_cloud import AromaLinkCloudClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +45,27 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._selected_device_type: str | None = None
         self._selected_sm_metadata: dict | None = None
         self._selected_gw_password: str | None = None
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry
+    ) -> config_entries.OptionsFlow:
+        """Create the options flow."""
+        return ScentDiffuserOptionsFlow(config_entry)
+
+    @classmethod
+    def async_supports_options_flow(
+        cls, config_entry: config_entries.ConfigEntry
+    ) -> bool:
+        """Offer options only to BLE entries with a timed refresh."""
+        data = config_entry.data
+        if data.get(CONF_CONNECTION_MODE, "ble") != "ble":
+            return False
+        try:
+            protocol = get_protocol(DeviceType(data.get(CONF_DEVICE_TYPE, "aroma_link")))
+        except ValueError:
+            return False
+        return protocol.periodic_refresh
 
     def _create_ble_entry(self) -> config_entries.ConfigFlowResult:
         """Build the BLE-mode config entry. Shared by all BLE setup paths."""
@@ -325,4 +348,36 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_CLOUD_DEVICE_ID): vol.In(device_options),
             }),
+        )
+
+
+class ScentDiffuserOptionsFlow(config_entries.OptionsFlow):
+    """Handle options for a Scent Diffuser entry."""
+
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self._entry = entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Set the BLE refresh interval."""
+        if user_input is not None:
+            options = dict(self._entry.options)
+            options.pop(CONF_REFRESH_INTERVAL, None)
+            interval = user_input[CONF_REFRESH_INTERVAL]
+            if interval != BLE_REFRESH_INTERVAL_SECONDS:
+                options[CONF_REFRESH_INTERVAL] = interval
+            return self.async_create_entry(data=options)
+
+        current = self._entry.options.get(
+            CONF_REFRESH_INTERVAL, BLE_REFRESH_INTERVAL_SECONDS
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(CONF_REFRESH_INTERVAL, default=current): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=3600),
+                ),
+            }),
+            description_placeholders={"default": str(BLE_REFRESH_INTERVAL_SECONDS)},
         )
