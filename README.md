@@ -46,6 +46,8 @@
 | AromaPlan Diffusers | AromaPlan | BLE + Cloud | Same as Aroma-Link, different branding |
 | DAP Smart Scent Air Machine (Model 11, A5) | AromaPlan | BLE | Broadcasts as `DAP.A5.Bluetooth`; uses Aroma-Link protocol |
 | Aromadd U5 Pro | Aromadd | BLE | Same as Aroma-Link, different branding; reports oil level |
+| Aromadd U5 | Aromadd | BLE | Same as Aroma-Link, different branding; broadcasts as `<name>.A5.WIFI`, where `<name>` is set in the app; built-in fan, no oil sensor |
+| Aromadd Rad-2 | Aromadd | BLE | Same as Aroma-Link, different branding; broadcasts as `<name>.A5.WIFI`, where `<name>` is set in the app; reports oil level |
 | Crearoma Diffusers | Aroma-Link | BLE + Cloud | Same as Aroma-Link, different branding |
 | ShinePick QT-I300 | Aroma Buddy | BLE | Tuya BLE protocol |
 | Scentiment Diffuser Air 2 | Scentiment | BLE | JSON-over-BLE protocol; intensity, RGB LED, battery |
