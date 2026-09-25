@@ -59,7 +59,7 @@
     "step": {
       "init": {
         "title": "Refresh interval",
-        "description": "How often Home Assistant reads this diffuser over Bluetooth, in seconds (default {default}). At 10 seconds or less the diffuser stays connected, so its phone app cannot connect and a Bluetooth proxy keeps one of its connection slots in use. Up to 10 seconds plus the connect time (about 40 seconds in total on a weak link), it is connected or connecting most of the time.",
+        "description": "How often Home Assistant reads this diffuser over Bluetooth, in seconds (default {default}). Below the default, a read may skip oil remaining and the work and pause durations, which are still read at least as often as at the default. At 10 seconds or less the diffuser stays connected, so its phone app cannot connect and a Bluetooth proxy keeps one of its connection slots in use. Up to 10 seconds plus the connect time (about 40 seconds in total on a weak link), it is connected or connecting most of the time.",
         "data": {
           "refresh_interval": "Refresh interval (seconds)"
         }
