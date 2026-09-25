@@ -55,6 +55,7 @@ async def async_get_config_entry_diagnostics(
             "level": s.level,
             "battery": s.battery,
             "oil_remaining": s.oil_remaining,
+            "oil_low": s.oil_low,
             "oil_current_ml": s.oil_current_ml,
             "oil_max_ml": s.oil_max_ml,
             "oil_consumption_mlh": s.oil_consumption_mlh,
