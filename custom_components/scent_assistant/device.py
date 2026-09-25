@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
 
 from bleak import BleakClient, BleakScanner, BleakError
@@ -135,6 +136,7 @@ class ScentDiffuserDevice:
         # State
         self._state = DiffuserState()
         self._state_callbacks: list[callable] = []
+        self._capability_unsubs: list[Callable[[], None]] = []
         # Wall-clock time of the last BLE notification that changed
         # state. Lets a user tell a fresh reading from a stale one
         # without the entity flapping to unavailable (#32).
@@ -262,10 +264,23 @@ class ScentDiffuserDevice:
         return True
 
     @property
-    def supports_battery(self) -> bool:
-        if self._state.has_battery is False:
-            return False
-        return True
+    def fan_present(self) -> bool | None:
+        return self._once_reported(self.supports_fan)
+
+    @property
+    def oil_percent_present(self) -> bool | None:
+        return self._once_reported(self.supports_oil_percent)
+
+    @property
+    def battery_present(self) -> bool | None:
+        return self._once_reported(self._state.has_battery is not False)
+
+    def _once_reported(self, value: bool) -> bool | None:
+        """Return value, or None before an Aroma-Link BLE unit's first 0A."""
+        proto = self._protocol
+        if self._ble_address and isinstance(proto, AromaLinkBleProtocol) and not proto.status_seen:
+            return None
+        return value
 
     @property
     def protocol_is_v3(self) -> bool:
@@ -296,11 +311,18 @@ class ScentDiffuserDevice:
     def available(self) -> bool:
         return self.connection_mode != "offline"
 
-    def register_state_callback(self, callback: callable) -> None:
+    def register_state_callback(self, callback: callable) -> Callable[[], None]:
+        """Add a state listener; return a function that removes it."""
         self._state_callbacks.append(callback)
 
+        def _remove() -> None:
+            if callback in self._state_callbacks:
+                self._state_callbacks.remove(callback)
+
+        return _remove
+
     def _notify_state_changed(self) -> None:
-        for cb in self._state_callbacks:
+        for cb in list(self._state_callbacks):
             try:
                 cb()
             except Exception:

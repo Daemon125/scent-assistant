@@ -13,6 +13,7 @@ from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .capability_entity import add_when_present
 from .const import DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
 
@@ -50,12 +51,18 @@ async def async_setup_entry(
     # unavailable until a value arrives, so it's safe to register them for
     # the whole family, except Oil and Battery when the 0A flags rule them out.
     if device.device_type == DeviceType.AROMA_LINK:
-        if device.supports_oil_percent:
-            entities.append(DiffuserOilSensor(device, entry))
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserOilSensor(device, entry)],
+            lambda: device.oil_percent_present,
+        )
         entities.append(DiffuserWorkRemainSensor(device, entry))
         entities.append(DiffuserPauseRemainSensor(device, entry))
-        if device.supports_battery:
-            entities.append(DiffuserBatterySensor(device, entry))
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserBatterySensor(device, entry)],
+            lambda: device.battery_present,
+        )
 
     if device.device_type in SCENT_MARKETING_TYPES:
         entities.append(DiffuserDetectionDiagnostic(device, entry))
