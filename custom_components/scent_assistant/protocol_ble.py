@@ -74,7 +74,7 @@ from .const import (
     AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC, AL_SUB_DEVICE_INFO,
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
     AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
-    AL_SUB_RADAR_MODE, AL_SUB_RADAR_SETTINGS,
+    AL_SUB_RADAR_MODE, AL_SUB_RADAR_SETTINGS, AL_SUB_OIL_DETECT,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
     AL_SLOT_ENABLED, AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
@@ -117,6 +117,8 @@ class DiffuserState:
     radar_level: int | None = None
     # Aroma-Link 52 21: (minutes, people, work_s, pause_s), index = level - 1.
     radar_settings: list | None = None
+    # Aroma-Link 52/53 1D: True where the app shows "oil insufficient".
+    oil_low: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -496,6 +498,10 @@ class AromaLinkBleProtocol(BleProtocol):
         """
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_LEVEL]))
 
+    def build_oil_detect_query(self) -> bytes:
+        """Build the low-oil query (`52 1D`, app: readOjiDetect)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_OIL_DETECT]))
+
     def build_radar_query(self) -> bytes:
         """Build the radar query (`52 21`, app: readRadarWorkSetting)."""
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_RADAR_SETTINGS]))
@@ -651,13 +657,13 @@ class AromaLinkBleProtocol(BleProtocol):
             if len(payload) >= 33:
                 result["has_fan"] = payload[32] != 0
             if len(payload) >= 35:
-                result["has_weight"] = payload[34] != 0
+                result["has_weight"] = payload[34] == 1
             if len(payload) >= 38:
                 result["has_lamp"] = payload[37] != 0
             if len(payload) >= 40:
                 result["has_ota"] = payload[39] != 0
             if len(payload) >= 42:
-                result["has_oil_detect"] = payload[41] != 0
+                result["has_oil_detect"] = payload[41] == 1
             if len(payload) >= 43:
                 result["has_oil_percent"] = payload[42] != 0
             if len(payload) >= 44:
@@ -666,6 +672,12 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["radar_mode"] = payload[44]
             if result.get("has_radar") and len(payload) >= 46:
                 result["radar_level"] = payload[45]
+            return result
+
+        if sub == AL_SUB_OIL_DETECT and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            # `52/53 1D <flag>` (app: lowOjiWarn)
+            if len(payload) >= 3 and payload[2:] != b"NACK":
+                result["oil_low"] = {0: False, 1: True}.get(payload[2])
             return result
 
         if cmd == AL_CMD_STATUS:

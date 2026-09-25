@@ -340,6 +340,7 @@ AL_RX_BUFFER_MAX = 512
 # @ndoty's Aromadd U5 Pro HCI snoop (#18), where the app read 0x1E and got
 # 0x50 while its UI showed 80%.
 AL_SUB_OIL_LEVEL = 0x1E
+AL_SUB_OIL_DETECT = 0x1D        # readOjiDetect: 0 ok, 1 low oil
 # "All work info" register (READ_ALL_WORK_INFO in the decompiled app).
 # The response carries device time, fan/lamp/power, work status, the
 # remaining seconds of the current work and pause phases, the schedule

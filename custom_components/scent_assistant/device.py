@@ -269,12 +269,21 @@ class ScentDiffuserDevice:
         return True
 
     @property
+    def supports_oil_detect(self) -> bool:
+        s = self._state
+        return s.has_oil_detect is True and s.has_weight is not True
+
+    @property
     def fan_present(self) -> bool | None:
         return self._once_reported(self.supports_fan)
 
     @property
     def oil_percent_present(self) -> bool | None:
         return self._once_reported(self.supports_oil_percent)
+
+    @property
+    def oil_detect_present(self) -> bool | None:
+        return self._once_reported(self.supports_oil_detect)
 
     @property
     def battery_present(self) -> bool | None:
@@ -772,7 +781,7 @@ class ScentDiffuserDevice:
         for _flag in (
             "has_battery", "has_weight", "has_lamp", "has_ota",
             "has_oil_detect", "has_oil_percent", "has_radar",
-            "radar_mode", "radar_level", "radar_settings",
+            "radar_mode", "radar_level", "radar_settings", "oil_low",
         ):
             if _flag in updates:
                 setattr(self._state, _flag, updates[_flag])
@@ -1442,6 +1451,10 @@ class ScentDiffuserDevice:
                     oil_query = getattr(self._protocol, "build_oil_query", None)
                     if oil_query is not None and self.supports_oil_percent:
                         await self._ble_send(oil_query())
+                        await asyncio.sleep(0.3)
+                    detect_query = getattr(self._protocol, "build_oil_detect_query", None)
+                    if detect_query is not None and self.supports_oil_detect:
+                        await self._ble_send(detect_query())
                         await asyncio.sleep(0.3)
                     radar_query = getattr(self._protocol, "build_radar_query", None)
                     if (
