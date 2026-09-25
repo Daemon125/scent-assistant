@@ -23,6 +23,7 @@ from .const import (
     BLE_INITIAL_REFRESH_RETRY_SECONDS,
     BLE_INITIAL_SILENT_READS_MAX,
     CLOUD_SCHEDULE_REFRESH_EVERY,
+    BLE_REFRESH_INTERVAL_SECONDS,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
@@ -59,6 +60,8 @@ BLE_IDLE_DISCONNECT_SECONDS = 10
 BLE_FAILURE_COOLDOWN_SECONDS = 3.0
 # A timed refresh running longer than this stops holding off the next tick.
 BLE_REFRESH_BUSY_MAX_SECONDS = 120
+# Below the default interval, timed refreshes wait this long after a failure.
+BLE_REFRESH_FAILURE_BACKOFF_SECONDS = 60
 # bleak_retry_connector max-attempts. HA's bluetooth stack already
 # layers its own retries on top of ours, so keeping this low avoids
 # 6-8 rapid connect attempts that can wedge some firmwares.
@@ -180,6 +183,7 @@ class ScentDiffuserDevice:
         self._momentary_task: asyncio.Task | None = None
         # Loop time the timed refresh in flight started, or None.
         self._periodic_refresh_ts: float | None = None
+        self.refresh_interval: int = BLE_REFRESH_INTERVAL_SECONDS
 
         # Scent Tech timer writes are read-modify-write on one record, so
         # they must not interleave; the events let a write wait for the
@@ -1475,9 +1479,24 @@ class ScentDiffuserDevice:
         busy_since = self._periodic_refresh_ts
         if busy_since is not None and started - busy_since < BLE_REFRESH_BUSY_MAX_SECONDS:
             return
+        short_interval = self.refresh_interval < BLE_REFRESH_INTERVAL_SECONDS
+        since_failure = started - self._ble_last_failure_ts
+        # A short interval would retry a failing unit every few seconds.
+        if short_interval and since_failure < BLE_REFRESH_FAILURE_BACKOFF_SECONDS:
+            return
         self._periodic_refresh_ts = started
+        torn_down = False
+        # A held link without notifications would never report state.
+        if short_interval and self._ble_connected and not self._ble_notify_subscribed:
+            async with self._ble_lock:
+                if self._ble_connected and not self._ble_notify_subscribed:
+                    await self._teardown_ble_client(reason="no-notify")
+                    torn_down = True
         try:
             await self.refresh_state()
+            # Back off, or each tick reconnects a unit that never notifies.
+            if torn_down and self._ble_connected and not self._ble_notify_subscribed:
+                self._ble_last_failure_ts = asyncio.get_event_loop().time()
         except Exception as err:
             _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
         finally:
