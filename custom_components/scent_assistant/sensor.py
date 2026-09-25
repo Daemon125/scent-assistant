@@ -57,6 +57,11 @@ async def async_setup_entry(
             [DiffuserOilSensor(device, entry)],
             lambda: device.oil_percent_present,
         )
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserOilLevelSensor(device, entry)],
+            lambda: device.oil_detect_present,
+        )
         entities.append(DiffuserWorkRemainSensor(device, entry))
         entities.append(DiffuserPauseRemainSensor(device, entry))
         add_when_present(
@@ -192,6 +197,38 @@ class DiffuserOilSensor(SensorEntity):
     @property
     def available(self) -> bool:
         return self._device.available and self._device.state.oil_remaining is not None
+
+
+class DiffuserOilLevelSensor(SensorEntity):
+    """Low-oil warning (Aroma-Link 52 1D)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Oil level"
+    _attr_icon = "mdi:water-alert"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["ok", "low"]
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_oil_level"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | None:
+        oil_low = self._device.state.oil_low
+        if oil_low is None:
+            return None
+        return "low" if oil_low else "ok"
+
+    @property
+    def available(self) -> bool:
+        return self._device.available and self._device.state.oil_low is not None
 
 
 class _OilFieldSensor(SensorEntity):
