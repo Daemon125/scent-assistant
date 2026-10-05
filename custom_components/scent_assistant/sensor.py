@@ -40,6 +40,9 @@ async def async_setup_entry(
     ]
     if device.device_type == DeviceType.SCENTIMENT:
         entities.append(DiffuserBatterySensor(device, entry))
+        # Air 2 reports oil in its status frame; the Mini 2 doesn't, so
+        # there the sensor just stays unavailable.
+        entities.append(DiffuserOilSensor(device, entry))
 
     if device.device_type in GW_TYPES:
         entities.append(DiffuserBatterySensor(device, entry))

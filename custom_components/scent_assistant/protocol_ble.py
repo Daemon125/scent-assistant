@@ -850,6 +850,28 @@ class ScentimentProtocol(BleProtocol):
         # The device pushes state via notifications; no explicit query needed.
         return b""
 
+    @staticmethod
+    def _parse_status_frame(frame) -> dict:
+        """Read the binary status frame the device wraps as {"data": [...]}.
+
+        Layout `55 AA 0B FF <on> 02 C8 <oil> FF <level> …`, 16 bytes, seen
+        on an Air 2 and a Mini 2 (#42). Byte 7 is 50 on the Air 2 and
+        0xFE on the Mini 2, which has no oil reading in the app — so it is
+        taken as the oil percentage, values above 100 meaning "none".
+        Inferred from those two units; awaiting confirmation.
+        """
+        if (
+            not isinstance(frame, list)
+            or len(frame) < 16
+            or frame[0] != 0x55
+            or frame[1] != 0xAA
+            or not all(isinstance(b, int) for b in frame)
+        ):
+            return {}
+        if frame[7] <= 100:
+            return {"oil_remaining": frame[7]}
+        return {}
+
     def parse_notification(self, data: bytes) -> dict:
         try:
             text = data.decode("utf-8", errors="replace").strip()
@@ -866,7 +888,9 @@ class ScentimentProtocol(BleProtocol):
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
+                    frame = parsed.pop("data", None)
                     result.update(parsed)
+                    result.update(self._parse_status_frame(frame))
             except Exception:
                 _LOGGER.debug("Scentiment: unparseable JSON notification: %r", text)
             return result
@@ -889,7 +913,9 @@ class ScentimentProtocol(BleProtocol):
                 elif key == "l":
                     result["level"] = n
                 elif key == "bat":
-                    result["battery"] = n
+                    # Units report Bat:200 once full on external power
+                    # (#42) — a status code, not a percentage.
+                    result["battery"] = max(0, min(100, n))
             return result
 
         # Single key:value notification
