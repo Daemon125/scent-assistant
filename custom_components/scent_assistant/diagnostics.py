@@ -97,6 +97,7 @@ async def async_get_config_entry_diagnostics(
                 if device and device.ble_last_update else None
             ),
             "periodic_refresh": device.supports_periodic_refresh if device else None,
+            "initial_state_pending": device.needs_initial_refresh if device else None,
             "supports_fan": device.supports_fan if device else None,
             "supports_cloud": device.supports_cloud if device else None,
         },

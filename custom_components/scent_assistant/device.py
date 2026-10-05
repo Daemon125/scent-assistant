@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DeviceType,
+    BLE_INITIAL_REFRESH_RETRY_SECONDS,
     CLOUD_SCHEDULE_REFRESH_EVERY,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
@@ -138,6 +139,10 @@ class ScentDiffuserDevice:
         # state. Lets a user tell a fresh reading from a stale one
         # without the entity flapping to unavailable (#32).
         self._ble_last_update: datetime | None = None
+        # Whether a BLE state read has completed since setup, and when
+        # the last advertisement-triggered retry of it was started.
+        self._ble_state_read = False
+        self._initial_retry_ts: float | None = None
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -326,17 +331,21 @@ class ScentDiffuserDevice:
 
             try:
                 _LOGGER.debug("BLE connecting to %s", self._ble_name)
-                # Prefer the BLEDevice cached by HA's bluetooth
-                # integration (it carries the right adapter / proxy
-                # routing info); fall back to a plain MAC string if the
-                # device hasn't been observed recently.
+                # Under HA, connect through the BLEDevice that HA's
+                # bluetooth integration has cached — it carries the
+                # adapter / proxy routing. There is no MAC-string
+                # fallback: establish_connection needs a BLEDevice and
+                # on BlueZ a string crashes with AttributeError, which
+                # escaped this handler into the calling automation
+                # (#43). A device HA can't see is a plain connect
+                # failure, so the cooldown applies to it too.
                 target = self._ble_address
                 if self._hass is not None:
-                    cached = bluetooth.async_ble_device_from_address(
-                        self._hass, self._ble_address, connectable=True,
-                    )
-                    if cached is not None:
-                        target = cached
+                    target = self._ha_ble_device()
+                    if target is None:
+                        raise BleakError(
+                            "not currently seen by any Bluetooth adapter or proxy"
+                        )
                 # Use bleak_retry_connector for robust connection
                 # establishment (handles transient failures with
                 # exponential backoff and is required by HA's bluetooth
@@ -518,6 +527,14 @@ class ScentDiffuserDevice:
                 await self._teardown_ble_client()
                 self._ble_last_failure_ts = loop.time()
                 return False
+
+    def _ha_ble_device(self):
+        """Return HA's connectable BLEDevice for this diffuser, or None."""
+        if self._hass is None or not self._ble_address:
+            return None
+        return bluetooth.async_ble_device_from_address(
+            self._hass, self._ble_address, connectable=True,
+        )
 
     def _schedule_disconnect(self) -> None:
         """Schedule BLE disconnect after idle period."""
@@ -1243,10 +1260,45 @@ class ScentDiffuserDevice:
             return
         if self._momentary_task is not None and not self._momentary_task.done():
             return
+        # A unit that is switched off or out of range is not an error
+        # worth a warning every interval — skip until HA sees it again.
+        if self._hass is not None and self._ha_ble_device() is None:
+            _LOGGER.debug("Periodic BLE refresh skipped, %s not in range", self._ble_name)
+            return
         try:
             await self.refresh_state()
         except Exception as err:
             _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
+
+    @property
+    def needs_initial_refresh(self) -> bool:
+        """True for a BLE device whose state hasn't been read since setup."""
+        return bool(self._ble_address) and not self._ble_state_read
+
+    def claim_initial_refresh_retry(self) -> bool:
+        """Decide whether an advertisement should retry the initial read.
+
+        Synchronous so the bluetooth callback can call it per
+        advertisement without piling up tasks: it stamps the attempt
+        before returning True, and refuses while a connection is in use.
+        """
+        if not self.needs_initial_refresh or self._ble_lock.locked():
+            return False
+        now = asyncio.get_event_loop().time()
+        if (
+            self._initial_retry_ts is not None
+            and now - self._initial_retry_ts < BLE_INITIAL_REFRESH_RETRY_SECONDS
+        ):
+            return False
+        self._initial_retry_ts = now
+        return True
+
+    async def async_retry_initial_refresh(self) -> None:
+        """Retry the setup-time state read; failures wait for the next one."""
+        try:
+            await self.refresh_state()
+        except Exception as err:
+            _LOGGER.debug("Initial BLE state retry failed on %s: %s", self._ble_name, err)
 
     async def refresh_state(self) -> None:
         """Refresh device state."""
@@ -1272,6 +1324,7 @@ class ScentDiffuserDevice:
                         weekday = (datetime.now().weekday() + 1) % 7
                         await self._ble_send(freq_query(weekday))
                         await asyncio.sleep(0.3)
+                    self._ble_state_read = True
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
                     self._ble_last_failure_ts = asyncio.get_event_loop().time()

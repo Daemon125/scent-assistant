@@ -493,6 +493,13 @@ CLOUD_POLL_INTERVAL_SECONDS = 60
 # official app ~97% of the time while still tracking oil consumption.
 BLE_REFRESH_INTERVAL_SECONDS = 300
 
+# A BLE device HA can't reach at setup (not yet seen after a restart,
+# switched off, proxy still connecting) gets its first state read
+# retried when its advertisements show up, at most this often — until
+# then its entities would sit on "unknown" until the first command
+# (#42, Mins95 in #8).
+BLE_INITIAL_REFRESH_RETRY_SECONDS = 60
+
 # ---------------------------------------------------------------------------
 # Weekday bitmask (shared by both protocols)
 # ---------------------------------------------------------------------------

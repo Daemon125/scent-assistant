@@ -6,8 +6,9 @@ from datetime import timedelta
 
 import voluptuous as vol
 
+from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 import homeassistant.helpers.config_validation as cv
@@ -113,6 +114,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("Initial state query failed, will retry on first command: %s", err)
 
     hass.data[DOMAIN][entry.entry_id] = device
+
+    # The setup-time read stays inline (platforms decide e.g. the fan
+    # switch from it, #34), but a device HA couldn't reach then would
+    # otherwise show "unknown" until the first command. Retry the read
+    # once its advertisements arrive, and stop listening after it lands.
+    if device.needs_initial_refresh:
+        unsub_adv = None
+
+        @callback
+        def _on_advertisement(service_info, change) -> None:
+            nonlocal unsub_adv
+            if not device.needs_initial_refresh:
+                if unsub_adv is not None:
+                    unsub_adv()
+                    unsub_adv = None
+                return
+            if device.claim_initial_refresh_retry():
+                entry.async_create_background_task(
+                    hass,
+                    device.async_retry_initial_refresh(),
+                    f"{DOMAIN} initial state {ble_address}",
+                )
+
+        unsub_adv = bluetooth.async_register_callback(
+            hass,
+            _on_advertisement,
+            {"address": ble_address, "connectable": True},
+            bluetooth.BluetoothScanningMode.PASSIVE,
+        )
+
+        @callback
+        def _stop_adv_listener() -> None:
+            if unsub_adv is not None:
+                unsub_adv()
+
+        entry.async_on_unload(_stop_adv_listener)
 
     # Cloud-mode devices have no push channel for autonomous state changes
     # (BLE devices push notifications when connected). Poll the cloud
