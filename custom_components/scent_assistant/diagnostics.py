@@ -85,7 +85,8 @@ async def async_get_config_entry_diagnostics(
                 sum(sl["enabled"] for day in s.week_slots for sl in day)
                 if s.week_slots is not None else None
             ),
-            "pump": s.pump,
+            "air_pump": s.air_pump,
+            "slot_level": s.slot_level,
             "device_code": s.device_code,
         }
 
@@ -111,6 +112,7 @@ async def async_get_config_entry_diagnostics(
             "supports_cloud": device.supports_cloud if device else None,
             "schedule_window_read": device.schedule_window_read if device else None,
             "schedule_durations_read": device.schedule_durations_read if device else None,
+            "durations_unreported": device.durations_unreported if device else None,
         },
         "sm_metadata": async_redact_data(
             dict(device.sm_metadata) if device and device.sm_metadata else {},
