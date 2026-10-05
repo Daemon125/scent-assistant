@@ -2499,23 +2499,26 @@ def detect_device_type(
     """Detect device type from advertisement.
 
     Detection priority:
-      1. Aroma-Link name code A0..A8 in "<name>.<code>.<suffix>".
-      2. Manufacturer-specific data for Scent Marketing families (most
+      1. Manufacturer-specific data for Scent Marketing families (most
          reliable — the Android app uses this exclusively).
-      3. Advertised service / manufacturer data for Aromely Aro Max
+      2. Advertised service / manufacturer data for Aromely Aro Max
          (its local name is a per-unit serial).
+      3. Aroma-Link name code A0..A8 in "<name>.<code>.<suffix>". After
+         the advertisement checks because <name> is set by the owner,
+         before the prefixes so a name like "Scent-Hall.A5.WIFI" can't
+         fall into another family.
       4. BLE local-name prefix patterns for the other families.
     """
-    parts = ble_name.split(".") if ble_name else []
-    if len(parts) > 1 and parts[1] in AL_NAME_CODES:
-        return DeviceType.AROMA_LINK
-
     sm_type = _detect_scent_marketing(advertisement_data)
     if sm_type is not None:
         return sm_type
 
     if _detect_aromely(advertisement_data):
         return DeviceType.AROMELY_ARO_MAX
+
+    parts = ble_name.split(".") if ble_name else []
+    if len(parts) > 1 and parts[1] in AL_NAME_CODES:
+        return DeviceType.AROMA_LINK
 
     if not ble_name:
         return None
