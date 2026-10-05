@@ -5,10 +5,12 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from bleak import BleakScanner
 
 from homeassistant import config_entries
-from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
+from homeassistant.components.bluetooth import (
+    BluetoothServiceInfoBleak,
+    async_discovered_service_info,
+)
 from .const import (
     DOMAIN,
     CONF_DEVICE_TYPE,
@@ -20,13 +22,24 @@ from .const import (
     CONF_CLOUD_USER_ID,
     CONF_CONNECTION_MODE,
     CONF_GW_PASSWORD,
-    DEFAULT_SCAN_TIMEOUT,
     DeviceType,
 )
 from .protocol_ble import detect_device_type, extract_scent_marketing_metadata
 from .protocol_cloud import AromaLinkCloudClient
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _advertised_name(info: BluetoothServiceInfoBleak) -> str:
+    """Return the advertised local name, or "" for a nameless device.
+
+    BluetoothServiceInfo falls back to the address when a device
+    advertises no name; treat that as nameless.
+    """
+    name = info.name or getattr(info.advertisement, "local_name", None) or ""
+    if name.replace("-", ":").upper() == info.address.upper():
+        return ""
+    return name
 
 
 class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -105,11 +118,7 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         adv = discovery_info.advertisement
-        name = discovery_info.name or getattr(adv, "local_name", None) or ""
-        # BluetoothServiceInfo falls back to the address when a device
-        # advertises no name; treat that as nameless.
-        if name.replace("-", ":").upper() == discovery_info.address.upper():
-            name = ""
+        name = _advertised_name(discovery_info)
         dtype = detect_device_type(name, adv)
         if dtype is None:
             return self.async_abort(reason="not_supported")
@@ -181,12 +190,15 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # If address is missing, user clicked Submit on an empty error
             # form – fall through to re-scan.
 
-        # Scan for devices
+        # List what HA's bluetooth integration has seen. A BleakScanner of
+        # our own would only reach the local adapter — never an ESPHome
+        # proxy (#45) — and competes with HA for it. Only connectable
+        # sources: a passive-only proxy can't run our protocol anyway.
         self._discovered_devices = {}
         try:
-            devices = await BleakScanner.discover(timeout=DEFAULT_SCAN_TIMEOUT, return_adv=True)
-            for device, adv_data in devices.values():
-                name = device.name or adv_data.local_name or ""
+            for info in async_discovered_service_info(self.hass, connectable=True):
+                adv_data = info.advertisement
+                name = _advertised_name(info)
                 dtype = detect_device_type(name, adv_data)
 
                 # A Scent Marketing device may advertise without a useful
@@ -195,21 +207,21 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not name and dtype is None:
                     continue
                 if not name:
-                    name = f"Scent Marketing {device.address[-8:]}"
+                    name = f"Scent Marketing {info.address[-8:]}"
 
                 sm_meta = extract_scent_marketing_metadata(adv_data) if dtype and dtype.value.startswith("scent_marketing") else None
                 if sm_meta:
                     _LOGGER.info(
                         "Discovered Scent Marketing device: addr=%s name=%s family=%s mfr_id=0x%04X pid=%s flag=%s raw=%s",
-                        device.address, name, dtype.value,
+                        info.address, name, dtype.value,
                         sm_meta["mfr_id"] or 0, sm_meta["pid"], sm_meta["wifi_flag"],
                         sm_meta["raw_hex"],
                     )
 
-                self._discovered_devices[device.address] = {
+                self._discovered_devices[info.address] = {
                     "name": name,
                     "device_type": dtype or DeviceType.AROMA_LINK,
-                    "rssi": adv_data.rssi,
+                    "rssi": info.rssi,
                     "auto_detected": dtype is not None,
                     "sm_metadata": sm_meta,
                 }

@@ -537,6 +537,5 @@ CONF_GW_PASSWORD = "gw_password"
 
 DEFAULT_WORK_DURATION = 10    # seconds
 DEFAULT_PAUSE_DURATION = 120  # seconds
-DEFAULT_SCAN_TIMEOUT = 10.0   # BLE scan seconds
 DEFAULT_CONNECT_TIMEOUT = 15  # BLE connect seconds
 DEFAULT_RECONNECT_DELAY = 30  # seconds between reconnect attempts
