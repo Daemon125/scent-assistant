@@ -504,6 +504,11 @@ BLE_REFRESH_INTERVAL_SECONDS = 300
 # then its entities would sit on "unknown" until the first command
 # (#42, Mins95 in #8).
 BLE_INITIAL_REFRESH_RETRY_SECONDS = 60
+# The read only counts as done once the device answers. A unit that
+# connects but stays silent (e.g. a Scentiment Mini 2 that only sends its
+# status on certain connects, #42) stops being retried after this many
+# silent reads, so it isn't reconnected every minute for good.
+BLE_INITIAL_SILENT_READS_MAX = 3
 
 # ---------------------------------------------------------------------------
 # Weekday bitmask (shared by both protocols)

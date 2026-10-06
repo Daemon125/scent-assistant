@@ -104,6 +104,8 @@ class DiffuserState:
     # Aroma-Link capability flag from the 0A frame. None = not reported
     # (yet); only an explicit False hides the fan switch.
     has_fan: bool | None = None
+    # Same for the battery (0A payload[31]); False skips the sensor.
+    has_battery: bool | None = None
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -634,8 +636,10 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["air_pump"] = payload[21]
             # Battery is only meaningful when the has-battery capability
             # flag is set (mains-only devices report 0 there).
-            if len(payload) >= 32 and payload[31] == 1:
-                result["battery"] = max(0, min(100, payload[30]))
+            if len(payload) >= 32:
+                result["has_battery"] = payload[31] == 1
+                if result["has_battery"]:
+                    result["battery"] = max(0, min(100, payload[30]))
             # The app hides its fan controls when this flag is 0
             # (DeviceControlActivity: hintFan(getHasFan() == 0)).
             if len(payload) >= 33:
@@ -932,28 +936,6 @@ class ScentimentProtocol(BleProtocol):
         # The device pushes state via notifications; no explicit query needed.
         return b""
 
-    @staticmethod
-    def _parse_status_frame(frame) -> dict:
-        """Read the binary status frame the device wraps as {"data": [...]}.
-
-        Layout `55 AA 0B FF <on> 02 C8 <oil> FF <level> …`, 16 bytes, seen
-        on an Air 2 and a Mini 2 (#42). Byte 7 is 50 on the Air 2 and
-        0xFE on the Mini 2, which has no oil reading in the app — so it is
-        taken as the oil percentage, values above 100 meaning "none".
-        Inferred from those two units; awaiting confirmation.
-        """
-        if (
-            not isinstance(frame, list)
-            or len(frame) < 16
-            or frame[0] != 0x55
-            or frame[1] != 0xAA
-            or not all(isinstance(b, int) for b in frame)
-        ):
-            return {}
-        if frame[7] <= 100:
-            return {"oil_remaining": frame[7]}
-        return {}
-
     def parse_notification(self, data: bytes) -> dict:
         try:
             text = data.decode("utf-8", errors="replace").strip()
@@ -970,9 +952,12 @@ class ScentimentProtocol(BleProtocol):
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
-                    frame = parsed.pop("data", None)
+                    # Binary status frame `{"data": [55 AA 0B FF …]}`, 16
+                    # bytes (#42). Not decoded: byte 7 looked like oil but
+                    # went 50 → 100 with no refill, and byte 6 = 200 next
+                    # to Bat:200 is a single sample. Dropped, not mapped.
+                    parsed.pop("data", None)
                     result.update(parsed)
-                    result.update(self._parse_status_frame(frame))
             except Exception:
                 _LOGGER.debug("Scentiment: unparseable JSON notification: %r", text)
             return result

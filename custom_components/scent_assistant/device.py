@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from bleak import BleakClient, BleakScanner, BleakError
@@ -20,6 +21,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import (
     DeviceType,
     BLE_INITIAL_REFRESH_RETRY_SECONDS,
+    BLE_INITIAL_SILENT_READS_MAX,
     CLOUD_SCHEDULE_REFRESH_EVERY,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
@@ -157,7 +159,10 @@ class ScentDiffuserDevice:
         self._ble_last_update: datetime | None = None
         # Whether a BLE state read has completed since setup, and when
         # the last advertisement-triggered retry of it was started.
+        # Set by the first notification that carries state, not by sending
+        # the query: a unit that stays silent must not count as read (#42).
         self._ble_state_read = False
+        self._silent_state_reads = 0
         self._initial_retry_ts: float | None = None
         self._week_query_attempts = 0
         # The unit answered neither 52 06 nor 52 15 (see AL_WEEK_QUERY_MAX_ATTEMPTS).
@@ -397,12 +402,25 @@ class ScentDiffuserDevice:
                 # escaped this handler into the calling automation
                 # (#43). A device HA can't see is a plain connect
                 # failure, so the cooldown applies to it too.
+                #
+                # HA routes a connection only through a scanner that has
+                # the device in its current discovered list. Checking the
+                # same thing up front fails in one step instead of
+                # establish_connection's ~10 backed-off attempts, which
+                # held the calling automation for that long (Mins95, #8).
                 target = self._ble_address
                 if self._hass is not None:
+                    if bluetooth.async_scanner_count(self._hass, connectable=True) == 0:
+                        raise BleakError(
+                            "no connectable Bluetooth adapter or proxy is ready yet"
+                        )
                     target = self._ha_ble_device()
-                    if target is None:
+                    if target is None or not bluetooth.async_scanner_devices_by_address(
+                        self._hass, self._ble_address, connectable=True
+                    ):
                         raise BleakError(
                             "not currently seen by any Bluetooth adapter or proxy"
+                            + self._last_seen_hint()
                         )
                 # Use bleak_retry_connector for robust connection
                 # establishment (handles transient failures with
@@ -595,6 +613,20 @@ class ScentDiffuserDevice:
         return bluetooth.async_ble_device_from_address(
             self._hass, self._ble_address, connectable=True,
         )
+
+    def _last_seen_hint(self) -> str:
+        """Describe the last advertisement HA got, for connect warnings.
+
+        A weak RSSI or a long gap tells the user it's range, not the
+        integration.
+        """
+        info = bluetooth.async_last_service_info(
+            self._hass, self._ble_address, connectable=False
+        )
+        if info is None:
+            return " (no advertisement received since Home Assistant started)"
+        age = max(0, time.monotonic() - info.time)
+        return f" (last advertisement {age:.0f} s ago via {info.source}, RSSI {info.rssi} dBm)"
 
     def _schedule_disconnect(self) -> None:
         """Schedule BLE disconnect after idle period."""
@@ -789,6 +821,9 @@ class ScentDiffuserDevice:
         if "has_fan" in updates:
             self._state.has_fan = updates["has_fan"]
             changed = True
+        if "has_battery" in updates:
+            self._state.has_battery = updates["has_battery"]
+            changed = True
         if "rgb_on" in updates:
             self._state.rgb_on = updates["rgb_on"]
             changed = True
@@ -892,7 +927,7 @@ class ScentDiffuserDevice:
             changed = True
 
         if changed:
-
+            self._ble_state_read = True
             self._ble_last_update = datetime.now().astimezone()
 
             self._notify_state_changed()
@@ -1441,6 +1476,11 @@ class ScentDiffuserDevice:
         """True for a BLE device whose state hasn't been read since setup."""
         return bool(self._ble_address) and not self._ble_state_read
 
+    @property
+    def silent_state_reads(self) -> int:
+        """Reads that connected but got no state back (diagnostics)."""
+        return self._silent_state_reads
+
     def claim_initial_refresh_retry(self) -> bool:
         """Decide whether an advertisement should retry the initial read.
 
@@ -1448,7 +1488,11 @@ class ScentDiffuserDevice:
         advertisement without piling up tasks: it stamps the attempt
         before returning True, and refuses while a connection is in use.
         """
-        if not self.needs_initial_refresh or self._ble_lock.locked():
+        if (
+            not self.needs_initial_refresh
+            or self._silent_state_reads >= BLE_INITIAL_SILENT_READS_MAX
+            or self._ble_lock.locked()
+        ):
             return False
         now = asyncio.get_event_loop().time()
         if (
@@ -1526,7 +1570,8 @@ class ScentDiffuserDevice:
                             self._ble_name, clock,
                         )
                         await self._ble_send(self._protocol.build_time_sync())
-                    self._ble_state_read = True
+                    if not self._ble_state_read:
+                        self._silent_state_reads += 1
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
                     self._ble_last_failure_ts = asyncio.get_event_loop().time()

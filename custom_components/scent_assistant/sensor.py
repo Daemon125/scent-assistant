@@ -40,9 +40,6 @@ async def async_setup_entry(
     ]
     if device.device_type == DeviceType.SCENTIMENT:
         entities.append(DiffuserBatterySensor(device, entry))
-        # Air 2 reports oil in its status frame; the Mini 2 doesn't, so
-        # there the sensor just stays unavailable.
-        entities.append(DiffuserOilSensor(device, entry))
 
     if device.device_type in GW_TYPES:
         entities.append(DiffuserBatterySensor(device, entry))
@@ -56,7 +53,10 @@ async def async_setup_entry(
         entities.append(DiffuserOilSensor(device, entry))
         entities.append(DiffuserWorkRemainSensor(device, entry))
         entities.append(DiffuserPauseRemainSensor(device, entry))
-        entities.append(DiffuserBatterySensor(device, entry))
+        # Like the fan switch (#34): only an explicit "no battery" from
+        # the setup read drops it; unknown keeps it (#18).
+        if device.state.has_battery is not False:
+            entities.append(DiffuserBatterySensor(device, entry))
 
     if device.device_type in SCENT_MARKETING_TYPES:
         entities.append(DiffuserDetectionDiagnostic(device, entry))

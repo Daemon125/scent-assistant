@@ -50,7 +50,7 @@
 | Aromadd Rad-2 | Aromadd | BLE | Same as Aroma-Link, different branding; broadcasts as `<name>.A5.WIFI`, where `<name>` is set in the app; reports oil level |
 | Crearoma Diffusers | Aroma-Link | BLE + Cloud | Same as Aroma-Link, different branding |
 | ShinePick QT-I300 | Aroma Buddy | BLE | Tuya BLE protocol |
-| Scentiment Diffuser Air 2 | Scentiment | BLE | JSON-over-BLE protocol; intensity, RGB LED, battery, oil level (new, awaiting confirmation) |
+| Scentiment Diffuser Air 2 | Scentiment | BLE | JSON-over-BLE protocol; intensity, RGB LED, battery |
 | Scentiment Mini 2 (DA37) | Scentiment | BLE | Same protocol as the Air 2; power, level 1–3, battery. Shown as "Scentiment Air 2" on the device page |
 | Scent Marketing diffusers (SA_* series) | Scent Marketing | BLE | V2 + V3 variants; Power, Fan, Program switch, intensity, schedule read-back |
 | Home Luxury Scents HLS-450+ | Home Luxury Scents | BLE | Rebadged Scent Marketing AK family |
@@ -156,7 +156,6 @@ The set of entities depends on which device family is connected.
 | Level | Number | Spray intensity (1–3) |
 | LED | Light | RGB color picker + on/off |
 | Battery | Sensor | Battery percentage (100 % when full on external power) |
-| Oil Level | Sensor | Remaining oil (Air 2 only; unavailable on the Mini 2) |
 
 ### Scent Marketing AK family
 
