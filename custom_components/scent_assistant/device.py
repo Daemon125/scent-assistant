@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from bleak import BleakClient, BleakScanner, BleakError
@@ -20,6 +21,8 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     DeviceType,
+    AL_DURATION_LIMITS,
+    AL_DURATION_LIMITS_DEFAULT,
     BLE_INITIAL_REFRESH_RETRY_SECONDS,
     BLE_INITIAL_SILENT_READS_MAX,
     CLOUD_SCHEDULE_REFRESH_EVERY,
@@ -125,6 +128,10 @@ class ScentDiffuserDevice:
         # enough that even the official app can't reconnect until a
         # power cycle, per @Mins95's 2026-06-01 report).
         self._ble_last_failure_ts: float = 0.0
+        self._device_info_query_sent = False
+        self._radar_query_sent = False
+        # 57 21 rewrites all five levels; interleaved writes lose a change.
+        self._radar_write_lock = asyncio.Lock()
 
         # Device type
         if device_type:
@@ -153,6 +160,7 @@ class ScentDiffuserDevice:
         # State
         self._state = DiffuserState()
         self._state_callbacks: list[callable] = []
+        self._capability_unsubs: list[Callable[[], None]] = []
         # Wall-clock time of the last BLE notification that changed
         # state. Lets a user tell a fresh reading from a stale one
         # without the entity flapping to unavailable (#32).
@@ -252,6 +260,8 @@ class ScentDiffuserDevice:
             DeviceType.SCENT_TECH: "Scent Tech / ScentLab",
         }
         base = mapping.get(self._device_type, self._device_type.value)
+        if self._device_type == DeviceType.AROMA_LINK and self._state.model_code:
+            base = f"{base} {self._state.model_code}"
         # Append the PID when known — different OEMs share the same family
         # but have distinct PIDs, useful for triage.
         pid = self._sm_metadata.get("pid")
@@ -267,6 +277,7 @@ class ScentDiffuserDevice:
             "name": self.name,
             "manufacturer": "Scent Diffuser",
             "model": self.model_name,
+            "sw_version": self._state.firmware_version,
         }
 
     @property
@@ -281,6 +292,60 @@ class ScentDiffuserDevice:
         if self._state.has_fan is False:
             return False
         return self._protocol.supports_fan()
+
+    @property
+    def supports_oil_percent(self) -> bool:
+        # App oil read order: scale 52 04, else low-oil 52 1D, else 52 1E.
+        s = self._state
+        if s.has_oil_percent is False or s.has_weight or s.has_oil_detect:
+            return False
+        return True
+
+    @property
+    def supports_oil_detect(self) -> bool:
+        s = self._state
+        return s.has_oil_detect is True and s.has_weight is not True
+
+    @property
+    def fan_present(self) -> bool | None:
+        return self._once_reported(self.supports_fan)
+
+    @property
+    def oil_percent_present(self) -> bool | None:
+        return self._once_reported(self.supports_oil_percent)
+
+    @property
+    def oil_detect_present(self) -> bool | None:
+        return self._once_reported(self.supports_oil_detect)
+
+    @property
+    def battery_present(self) -> bool | None:
+        return self._once_reported(self._state.has_battery is not False)
+
+    def _once_reported(self, value: bool) -> bool | None:
+        """Return value, or None before an Aroma-Link BLE unit's first 0A."""
+        proto = self._protocol
+        if self._ble_address and isinstance(proto, AromaLinkBleProtocol) and not proto.status_seen:
+            return None
+        return value
+
+    @property
+    def supports_radar(self) -> bool:
+        return self._state.has_radar is True
+
+    @property
+    def radar_present(self) -> bool | None:
+        if self._ble_address and self._state.has_radar is None:
+            return None
+        return self.supports_radar
+
+    @property
+    def radar_mode_active(self) -> bool:
+        return self.supports_radar and self._state.radar_mode == 1
+
+    @property
+    def duration_limits(self) -> dict:
+        return AL_DURATION_LIMITS.get(self._state.model_code, AL_DURATION_LIMITS_DEFAULT)
 
     @property
     def protocol_is_v3(self) -> bool:
@@ -323,6 +388,14 @@ class ScentDiffuserDevice:
                 "Try again once the device has been reachable for a moment."
             )
 
+    def require_app_mode(self) -> None:
+        """Refuse a schedule edit while an Aroma-Link unit is in radar mode."""
+        if self.radar_mode_active:
+            raise HomeAssistantError(
+                f"{self._ble_name}: the unit is in radar mode, which doesn't "
+                "use the schedule. Switch Mode to App first."
+            )
+
     @property
     def supports_cloud(self) -> bool:
         return self._cloud is not None and self._cloud_device_id is not None
@@ -339,11 +412,18 @@ class ScentDiffuserDevice:
     def available(self) -> bool:
         return self.connection_mode != "offline"
 
-    def register_state_callback(self, callback: callable) -> None:
+    def register_state_callback(self, callback: callable) -> Callable[[], None]:
+        """Add a state listener; return a function that removes it."""
         self._state_callbacks.append(callback)
 
+        def _remove() -> None:
+            if callback in self._state_callbacks:
+                self._state_callbacks.remove(callback)
+
+        return _remove
+
     def _notify_state_changed(self) -> None:
-        for cb in self._state_callbacks:
+        for cb in list(self._state_callbacks):
             try:
                 cb()
             except Exception:
@@ -773,11 +853,22 @@ class ScentDiffuserDevice:
     def _on_ble_notification(self, sender: int, data: bytearray) -> None:
         """Handle incoming BLE notification."""
         raw = bytes(data)
-        # Keep a short ring-buffer of raw frames for the diagnostics export.
-        self._recent_notifications.append(raw.hex())
+        # Keep a short ring of raw frames for diagnostics, 52 0D IMEI masked.
+        ring_hex = getattr(self._protocol, "ring_hex", None)
+        self._recent_notifications.append(ring_hex(raw) if ring_hex else raw.hex())
         if len(self._recent_notifications) > 20:
             del self._recent_notifications[0]
         updates = self._protocol.parse_notification(raw)
+        masked = updates.get("masked_frame_hex")
+        if masked:
+            # The frame's chunks are the newest ring entries.
+            end = len(masked)
+            i = len(self._recent_notifications)
+            while end > 0 and i > 0:
+                i -= 1
+                start = end - len(self._recent_notifications[i])
+                self._recent_notifications[i] = masked[max(start, 0):end]
+                end = start
         if not updates:
             return
         if "nack" in updates:
@@ -824,6 +915,14 @@ class ScentDiffuserDevice:
         if "has_battery" in updates:
             self._state.has_battery = updates["has_battery"]
             changed = True
+        for _flag in (
+            "has_weight", "has_lamp", "has_ota",
+            "has_oil_detect", "has_oil_percent", "has_radar",
+            "radar_mode", "radar_level", "radar_settings", "oil_low",
+        ):
+            if _flag in updates:
+                setattr(self._state, _flag, updates[_flag])
+                changed = True
         if "rgb_on" in updates:
             self._state.rgb_on = updates["rgb_on"]
             changed = True
@@ -1063,6 +1162,71 @@ class ScentDiffuserDevice:
                 return True
         return False
 
+    async def set_radar_mode(self, radar: bool) -> bool:
+        """Set the app or radar work mode (Aroma-Link)."""
+        if not self._ble_address:
+            return False
+        proto = self._protocol
+        if isinstance(proto, AromaLinkBleProtocol):
+            cmd = proto.build_radar_mode(radar)
+            if await self._ble_execute(cmd):
+                self._state.radar_mode = 1 if radar else 0
+                self._notify_state_changed()
+                return True
+        return False
+
+    async def set_radar_level_times(
+        self, level: int, work: int | None = None, pause: int | None = None,
+    ) -> bool:
+        """Set the work and pause seconds of one radar level (Aroma-Link)."""
+        proto = self._protocol
+        if not isinstance(proto, AromaLinkBleProtocol) or not self._ble_address:
+            return False
+        async with self._radar_write_lock:
+            settings = self._state.radar_settings
+            if not settings or not 1 <= level <= len(settings):
+                raise HomeAssistantError(
+                    f"{self._ble_name}: radar level {level} settings not known"
+                )
+            if self._state.radar_mode != 1:
+                raise HomeAssistantError(
+                    f"{self._ble_name}: radar levels can be changed only in radar mode"
+                )
+            minutes, people, old_work, old_pause = settings[level - 1]
+            new = list(settings)
+            new[level - 1] = (
+                minutes, people,
+                old_work if work is None else work,
+                old_pause if pause is None else pause,
+            )
+            work_min, work_max = self.duration_limits["work"]
+            pause_min, pause_max = self.duration_limits["pause"]
+            if not all(
+                work_min <= w <= work_max and pause_min <= p <= pause_max
+                for _, _, w, p in new
+            ):
+                raise HomeAssistantError(
+                    f"{self._ble_name}: radar work must be {work_min}-{work_max} s "
+                    f"and pause {pause_min}-{pause_max} s"
+                )
+            work_by_level = [r[2] for r in new]
+            people_by_level = [r[1] for r in new]
+            if not all(a < b for a, b in zip(work_by_level, work_by_level[1:])):
+                raise HomeAssistantError(
+                    f"{self._ble_name}: radar work seconds must rise from Min to Max"
+                )
+            if not all(a < b for a, b in zip([0] + people_by_level, people_by_level)):
+                raise HomeAssistantError(
+                    f"{self._ble_name}: radar people must rise from Min to Max"
+                )
+            if await self._ble_execute(proto.build_radar_settings(new)):
+                self._state.radar_settings = new
+                # State is optimistic until the next 52 21 read.
+                self._radar_query_sent = False
+                self._notify_state_changed()
+                return True
+            return False
+
     async def set_lock(self, on: bool) -> bool:
         """Toggle child-lock (Scent Marketing AK + GW + GW-XOR)."""
         if not self._ble_address:
@@ -1199,6 +1363,7 @@ class ScentDiffuserDevice:
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
         self.require_schedule_read()
+        self.require_app_mode()
         previous = self._state.work_seconds
         self._state.work_seconds = seconds
         # Setting an explicit duration means the user wants Custom mode.
@@ -1211,6 +1376,7 @@ class ScentDiffuserDevice:
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
         self.require_schedule_read()
+        self.require_app_mode()
         previous = self._state.pause_seconds
         self._state.pause_seconds = seconds
         if await self._write_schedule_to_device(custom_mode=True):
@@ -1518,13 +1684,35 @@ class ScentDiffuserDevice:
                     clock_before = self._state.device_clock
                     await self._ble_send(self._protocol.build_query())
                     await asyncio.sleep(1.0)
+                    info_query = getattr(self._protocol, "build_device_info_query", None)
+                    if (
+                        info_query is not None
+                        and self._state.has_ota
+                        and not self._device_info_query_sent
+                    ):
+                        if await self._ble_send(info_query()):
+                            self._device_info_query_sent = True
+                            await asyncio.sleep(0.3)
                     # Some protocols expose extra read-registers that the
                     # device only reports on demand (e.g. Aroma-Link's oil
                     # level). Query them too when the protocol offers one.
                     oil_query = getattr(self._protocol, "build_oil_query", None)
-                    if oil_query is not None:
+                    if oil_query is not None and self.supports_oil_percent:
                         await self._ble_send(oil_query())
                         await asyncio.sleep(0.3)
+                    detect_query = getattr(self._protocol, "build_oil_detect_query", None)
+                    if detect_query is not None and self.supports_oil_detect:
+                        await self._ble_send(detect_query())
+                        await asyncio.sleep(0.3)
+                    radar_query = getattr(self._protocol, "build_radar_query", None)
+                    if (
+                        radar_query is not None
+                        and self._state.has_radar
+                        and (not self._radar_query_sent or self._state.radar_settings is None)
+                    ):
+                        if await self._ble_send(radar_query()):
+                            self._radar_query_sent = True
+                            await asyncio.sleep(0.3)
                     # Configured work/pause durations live in a separate
                     # per-weekday register on Aroma-Link (the status frame
                     # only carries the *remaining* times). We write every

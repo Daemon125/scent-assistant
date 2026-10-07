@@ -13,6 +13,7 @@ from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .capability_entity import add_when_present
 from .const import DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
 
@@ -24,6 +25,7 @@ SCENT_MARKETING_TYPES = {
     DeviceType.SCENT_MARKETING_GW_XOR,
 }
 GW_TYPES = {DeviceType.SCENT_MARKETING_GW, DeviceType.SCENT_MARKETING_GW_XOR}
+RADAR_LEVELS = {1: "min", 2: "low", 3: "med", 4: "high", 5: "max"}
 
 
 async def async_setup_entry(
@@ -48,15 +50,30 @@ async def async_setup_entry(
     # Aroma-Link reports a liquid level via read-register 0x1E and live
     # work/pause countdowns + battery via 0x0A. All of these sensors stay
     # unavailable until a value arrives, so it's safe to register them for
-    # the whole family even though only some models answer the queries.
+    # the whole family, except those gated on the 0A capability flags.
     if device.device_type == DeviceType.AROMA_LINK:
-        entities.append(DiffuserOilSensor(device, entry))
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserOilSensor(device, entry)],
+            lambda: device.oil_percent_present,
+        )
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserOilLevelSensor(device, entry)],
+            lambda: device.oil_detect_present,
+        )
         entities.append(DiffuserWorkRemainSensor(device, entry))
         entities.append(DiffuserPauseRemainSensor(device, entry))
-        # Like the fan switch (#34): only an explicit "no battery" from
-        # the setup read drops it; unknown keeps it (#18).
-        if device.state.has_battery is not False:
-            entities.append(DiffuserBatterySensor(device, entry))
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserBatterySensor(device, entry)],
+            lambda: device.battery_present,
+        )
+        add_when_present(
+            hass, entry, device, async_add_entities,
+            [DiffuserRadarLevelSensor(device, entry)],
+            lambda: device.radar_present,
+        )
 
     if device.device_type in SCENT_MARKETING_TYPES:
         entities.append(DiffuserDetectionDiagnostic(device, entry))
@@ -180,6 +197,38 @@ class DiffuserOilSensor(SensorEntity):
     @property
     def available(self) -> bool:
         return self._device.available and self._device.state.oil_remaining is not None
+
+
+class DiffuserOilLevelSensor(SensorEntity):
+    """Low-oil warning (Aroma-Link 52 1D)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Oil level"
+    _attr_icon = "mdi:water-alert"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["ok", "low"]
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_oil_level"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | None:
+        oil_low = self._device.state.oil_low
+        if oil_low is None:
+            return None
+        return "low" if oil_low else "ok"
+
+    @property
+    def available(self) -> bool:
+        return self._device.available and self._device.state.oil_low is not None
 
 
 class _OilFieldSensor(SensorEntity):
@@ -328,6 +377,69 @@ class DiffuserPauseRemainSensor(SensorEntity):
     @property
     def available(self) -> bool:
         return self._device.available and self._device.state.pause_remaining is not None
+
+
+class DiffuserRadarLevelSensor(SensorEntity):
+    """Active radar level (Aroma-Link 52 0A, 52 21)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Radar level"
+    _attr_icon = "mdi:radar"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [*RADAR_LEVELS.values(), "disabled"]
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_radar_level"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | None:
+        state = self._device.state
+        if state.radar_mode == 0:
+            return "disabled"
+        return RADAR_LEVELS.get(state.radar_level)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        state = self._device.state
+        settings = state.radar_settings
+        if not settings:
+            return None
+        attrs = {
+            "levels": {
+                name: {
+                    "detection_minutes": minutes,
+                    "people": people,
+                    "work_seconds": work,
+                    "pause_seconds": pause,
+                }
+                for name, (minutes, people, work, pause) in zip(RADAR_LEVELS.values(), settings)
+            },
+        }
+        level = state.radar_level
+        if state.radar_mode == 1 and level in RADAR_LEVELS:
+            minutes, people, work, pause = settings[level - 1]
+            attrs["detection_minutes"] = minutes
+            attrs["people_from"] = people
+            attrs["people_to"] = settings[level][1] if level < len(settings) else None
+            attrs["work_seconds"] = work
+            attrs["pause_seconds"] = pause
+        return attrs
+
+    @property
+    def available(self) -> bool:
+        return (
+            self._device.available
+            and self._device.supports_radar
+            and self._device.state.radar_level is not None
+        )
 
 
 class DiffuserDetectionDiagnostic(SensorEntity):

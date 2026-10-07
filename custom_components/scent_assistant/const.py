@@ -333,6 +333,8 @@ AL_SUB_DEVICE_INFO = 0x0D
 AL_SUB_QUERY_SCHEDULES = 0x15   # READ_WEEK_WORK_TIME: 7 days (Mon..Sun) x 5 x 9-byte slots
 AL_SUB_WORK_INFO = 0x09         # READ_WORK_INFO / LISTEN_WORKING_MSG: phase + *remaining* times
 AL_SUB_WORK_FREQUENCY = 0x06    # READ_WORK_FREQUENCY <weekday>: 5 slots × (work u16, pause u16, flags)
+AL_SUB_RADAR_MODE = 0x20        # setRadarWorkMode: 0 app, 1 radar
+AL_SUB_RADAR_SETTINGS = 0x21    # readRadarWorkSetting: 5 × (minutes, people, work u16, pause u16)
 # Reassembly cap for multi-notification frames. The longest reply the app
 # reads is READ_WEEK_WORK_TIME at ~320 bytes; anything past this is junk.
 AL_RX_BUFFER_MAX = 512
@@ -341,6 +343,7 @@ AL_RX_BUFFER_MAX = 512
 # @ndoty's Aromadd U5 Pro HCI snoop (#18), where the app read 0x1E and got
 # 0x50 while its UI showed 80%.
 AL_SUB_OIL_LEVEL = 0x1E
+AL_SUB_OIL_DETECT = 0x1D        # readOjiDetect: 0 ok, 1 low oil
 # "All work info" register (READ_ALL_WORK_INFO in the decompiled app).
 # The response carries device time, fan/lamp/power, work status, the
 # remaining seconds of the current work and pause phases, the schedule
@@ -361,6 +364,13 @@ AL_MANY_PUMP_DEVICE_CODES = (0x2502, 0x2503)
 AL_PHASE_IDLE = 0x00
 AL_PHASE_SPRAYING = 0x01
 AL_PHASE_PAUSED = 0x02
+
+# Work and pause (min, max) seconds by 52 0D hostName (app: dealDeviceMsg).
+AL_DURATION_LIMITS = {
+    "RAD-2": {"work": (5, 120), "pause": (90, 900)},
+    "D-Air_2": {"work": (10, 300), "pause": (10, 300)},
+}
+AL_DURATION_LIMITS_DEFAULT = {"work": (5, 900), "pause": (5, 900)}
 
 # ---------------------------------------------------------------------------
 # Scent Marketing — GW family DP-frame protocol constants
