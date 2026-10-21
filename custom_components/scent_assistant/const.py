@@ -400,6 +400,21 @@ SM_GW_MODE_INTERVAL = 0
 SM_GW_MODE_NONE = 1
 SM_GW_MODE_QUICK = 2
 
+# DP 4 task layout (GwBleCtrl.handleTasksAndPower, decoded by @oronshvartz
+# from Scent Marketing 4.8.32, #50): 7 bytes per task, the last one the
+# grade — 1-20 picks a row of the device's fixed grade table, 0 runs the
+# customize-gear timing carried in DP 15.
+SM_GW_TASK_LEN = 7
+SM_GW_GRADE_CUSTOM = 0
+# Countdown + quick-fragrance blocks that close the DP 4 payload. Written
+# as-is until the device has reported its own.
+SM_GW_TASK_TRAILER = bytes([0x01, 0x64, 0x00, 0x00, 0x02, 0x01, 0x2C, 0x00])
+# DP 15 customize gear: run, pause, min run, max run, min pause, max pause
+# (u16 BE, seconds). The limits are echoed from the device's last report;
+# these stand in until it has sent one.
+SM_GW_GEAR_LEN = 12
+SM_GW_GEAR_DEFAULT_LIMITS = (5, 300, 5, 300)
+
 # Chunk size for multi-packet writes. The Scent Marketing app uses 18 bytes
 # of payload per chunk, prefixed by a 2-byte (nonce, sequence) header — fitting
 # the 20-byte default BLE write MTU.

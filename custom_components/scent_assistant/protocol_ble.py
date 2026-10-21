@@ -47,6 +47,8 @@ from .const import (
     SM_GW_DP_CUSTOMIZE_GEAR, SM_GW_DP_REMARK,
     SM_GW_PASSWORD_MARKER, SM_GW_PASSWORD_OK_BYTE,
     SM_GW_INIT_PACKET, SM_GW_HEARTBEAT_HEX, SM_GW_XOR_DICT,
+    SM_GW_TASK_LEN, SM_GW_GRADE_CUSTOM, SM_GW_TASK_TRAILER,
+    SM_GW_GEAR_LEN, SM_GW_GEAR_DEFAULT_LIMITS,
     AROMELY_SERVICE_UUID, AROMELY_CHAR_WRITE_UUID, AROMELY_CHAR_NOTIFY_UUID,
     AROMELY_ADV_SERVICE_UUID,
     SCENT_TECH_SERVICE_UUID, SCENT_TECH_CHAR_UUID,
@@ -1805,6 +1807,12 @@ class ScentMarketingGwProtocol(BleProtocol):
         # frame. The wire layout is the same; only the type-tag-driven
         # length decoding differs.
         self._tuya_dp_mode = tuya_dp_mode
+        # Last DP 4 / DP 15 read-back. A schedule write replaces the whole
+        # task list, so the tasks HA doesn't manage are written back as
+        # read, and the gear limits are echoed.
+        self._tasks: list[bytes] = []
+        self._task_trailer: bytes | None = None
+        self._gear_limits: tuple[int, int, int, int] | None = None
 
     # ------------------------------------------------------------------
     # Frame builders
@@ -1952,7 +1960,8 @@ class ScentMarketingGwProtocol(BleProtocol):
     # ------------------------------------------------------------------
 
     def build_schedule(self, slots: list["ScheduleSlot"],
-                       weekday_mask: int = 0x7F) -> bytes:
+                       weekday_mask: int = 0x7F,
+                       custom_mode: bool | None = True) -> bytes:
         """Port of `GwBleCtrl.handleTasksAndPower()` for single-nozzle
         devices (modelNode != 23).
 
@@ -1964,34 +1973,107 @@ class ScentMarketingGwProtocol(BleProtocol):
             00 <task_count>                  task count u16
             for each task: 7 bytes
                 [enabled<<7 | weekday_mask:7] [start_h] [start_m]
-                [end_h] [end_m] [spray=1] [power=intensity]
+                [end_h] [end_m] [spray=1] [grade]
             01 64 00 <countdown_power>       reserved + countdown sentinel
             02 01 2C <quick_power>           quick-fragrance sentinel
-            (optionally) 00 0F AF 00 0C ...  customize-gear block
+            00 0F AF 00 0C <run> <pause>     DP 15 customize gear, present
+               <min/max run> <min/max pause> whenever a task has grade 0
 
-        We do not currently emit the customize-gear block (we leave it
-        for users who explicitly opt-in to per-slot custom timings via
-        the integration's existing schedule service).
+        `slots` replace the device's first tasks; any further tasks it
+        reported are written back unchanged. `custom_mode=True` writes
+        grade 0 so the device runs the slot's work/pause; None keeps the
+        grade the task was read with (0 when unknown).
         """
-        task_count = len(slots)
-        payload = bytearray()
-        payload += bytes([0x01, 0x00])                # sub-version
-        payload += bytes([0x00, task_count & 0xFF])   # task count u16
-        for slot in slots:
-            day_bits = weekday_mask & 0x7F
-            flags = day_bits | (0x80 if slot.enabled else 0x00)
-            power = slot.work_seconds if slot.work_seconds <= 0xFF else 0xFF
-            payload += bytes([
-                flags & 0xFF,
+        tasks = list(self._tasks)
+        for i, slot in enumerate(slots):
+            if custom_mode or i >= len(tasks):
+                grade = SM_GW_GRADE_CUSTOM
+            else:
+                grade = tasks[i][6]
+            flags = (weekday_mask & 0x7F) | (0x80 if slot.enabled else 0x00)
+            task = bytes([
+                flags,
                 slot.start_hour & 0xFF, slot.start_minute & 0xFF,
                 slot.end_hour & 0xFF, slot.end_minute & 0xFF,
                 0x01,                       # spray = 1
-                power & 0xFF,
+                grade,
             ])
-        payload += bytes([0x01, 0x64, 0x00, 0x00])    # countdown sentinel
-        payload += bytes([0x02, 0x01, 0x2C, 0x00])    # quick-fragrance sentinel
-        dp4 = self._build_composite_dp(SM_GW_DP_MODE_TASKS, bytes(payload))
-        return self._build_frame([dp4])
+            if i < len(tasks):
+                tasks[i] = task
+            else:
+                tasks.append(task)
+        payload = bytearray()
+        payload += bytes([0x01, 0x00])                # sub-version
+        payload += self._u16_be(len(tasks))           # task count u16
+        for task in tasks:
+            payload += task
+        payload += self._task_trailer or SM_GW_TASK_TRAILER
+        dps = [self._build_composite_dp(SM_GW_DP_MODE_TASKS, bytes(payload))]
+        if slots and any(task[6] == SM_GW_GRADE_CUSTOM for task in tasks):
+            dps.append(self._build_composite_dp(
+                SM_GW_DP_CUSTOMIZE_GEAR,
+                self._gear_payload(slots[0].work_seconds, slots[0].pause_seconds),
+            ))
+        return self._build_frame(dps)
+
+    def _gear_payload(self, work: int, pause: int) -> bytes:
+        """DP 15 body: run + pause, then the limits the device reported.
+
+        Clamped to those limits only once the device has sent them; the
+        defaults stand in for the wire format, not for the device's range.
+        """
+        limits = self._gear_limits
+        if limits is not None:
+            work = max(limits[0], min(limits[1], work))
+            pause = max(limits[2], min(limits[3], pause))
+        values = (work, pause) + (limits or SM_GW_GEAR_DEFAULT_LIMITS)
+        return b"".join(self._u16_be(max(0, min(0xFFFF, int(v)))) for v in values)
+
+    def _absorb_tasks(self, payload: bytes, result: dict) -> None:
+        """Read DP 4 back: keep the task list, report the first task."""
+        if len(payload) < 4:
+            return
+        count = (payload[2] << 8) | payload[3]
+        end = 4 + count * SM_GW_TASK_LEN
+        # Only the single-nozzle layout we write is understood; anything
+        # else (multi-nozzle units) is left alone rather than misread.
+        if len(payload) != end + len(SM_GW_TASK_TRAILER):
+            _LOGGER.debug("Scent Marketing GW: unexpected DP 4 layout %s", payload.hex())
+            return
+        self._tasks = [
+            bytes(payload[i:i + SM_GW_TASK_LEN])
+            for i in range(4, end, SM_GW_TASK_LEN)
+        ]
+        self._task_trailer = bytes(payload[end:])
+        if not self._tasks:
+            return
+        flags, s_h, s_m, e_h, e_m, _spray, grade = self._tasks[0]
+        result["schedule_enabled"] = bool(flags & 0x80)
+        result["weekday_mask"] = flags & 0x7F
+        result["start_hour"], result["start_minute"] = s_h, s_m
+        result["end_hour"], result["end_minute"] = e_h, e_m
+        result["schedule_custom_mode"] = grade == SM_GW_GRADE_CUSTOM
+        if grade != SM_GW_GRADE_CUSTOM:
+            result["intensity"] = grade
+
+    def _absorb_gear(self, payload: bytes, result: dict) -> None:
+        """Read DP 15 back: customize-gear run/pause and their limits."""
+        if len(payload) < SM_GW_GEAR_LEN:
+            return
+        run, pause, min_run, max_run, min_pause, max_pause = (
+            (payload[i] << 8) | payload[i + 1] for i in range(0, SM_GW_GEAR_LEN, 2)
+        )
+        if 0 < min_run <= max_run and 0 < min_pause <= max_pause:
+            self._gear_limits = (min_run, max_run, min_pause, max_pause)
+        if run:
+            result["work_seconds"] = run
+        if pause:
+            result["pause_seconds"] = pause
+
+    @property
+    def gear_limits(self) -> tuple[int, int, int, int] | None:
+        """(min run, max run, min pause, max pause) as the device reported."""
+        return self._gear_limits
 
     # ------------------------------------------------------------------
     # Notification parsing
@@ -2122,6 +2204,10 @@ class ScentMarketingGwProtocol(BleProtocol):
         elif dp_id == SM_GW_DP_FAN and len(payload) >= 3:
             # [size, max_level, current_level] — surface current_level only.
             result["fan"] = (payload[2] & 0xFF) > 0
+        elif dp_id == SM_GW_DP_MODE_TASKS:
+            self._absorb_tasks(payload, result)
+        elif dp_id == SM_GW_DP_CUSTOMIZE_GEAR:
+            self._absorb_gear(payload, result)
 
     def _parse_dp(self, frame: bytes, idx: int, dp_id: int, result: dict) -> int:
         """Parse a single DP starting at `idx`. Returns the new index."""

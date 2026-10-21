@@ -305,6 +305,14 @@ class ScentDiffuserDevice:
         return None
 
     @property
+    def gw_gear_limits(self) -> tuple[int, int, int, int] | None:
+        """GW work/pause limits from the last DP 15 report (diagnostics)."""
+        proto = self._protocol
+        if isinstance(proto, ScentMarketingGwProtocol):
+            return proto.gear_limits
+        return None
+
+    @property
     def schedule_window_read(self) -> bool:
         """False while a BLE Aroma-Link unit has not reported its window."""
         if self._ble_address and isinstance(self._protocol, AromaLinkBleProtocol):
@@ -1377,7 +1385,11 @@ class ScentDiffuserDevice:
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,
                 )
-                cmd = self._protocol.build_schedule([slot], weekday_mask=weekday_mask)
+                # Work/Pause edits switch the task to the custom grade; any
+                # other edit keeps the grade the device reported (#50).
+                cmd = self._protocol.build_schedule(
+                    [slot], weekday_mask=weekday_mask, custom_mode=custom_mode,
+                )
             elif isinstance(self._protocol, ScentMarketingAkProtocol):
                 slot = ScheduleSlot(
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
