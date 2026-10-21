@@ -522,6 +522,11 @@ CLOUD_POLL_INTERVAL_SECONDS = 60
 # interval. Five minutes keeps the device's single BLE slot free for the
 # official app ~97% of the time while still tracking oil consumption.
 BLE_REFRESH_INTERVAL_SECONDS = 300
+# bleak_retry_connector max-attempts (device connects and the config
+# flow's GATT probe). HA's bluetooth stack already layers its own
+# retries on top of ours, so keeping this low avoids 6-8 rapid connect
+# attempts that can wedge some firmwares.
+BLE_CONNECT_MAX_ATTEMPTS = 2
 
 # A BLE device HA can't reach at setup (not yet seen after a restart,
 # switched off, proxy still connecting) gets its first state read

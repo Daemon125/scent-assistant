@@ -2741,3 +2741,34 @@ def _detect_aromely(advertisement_data) -> bool:
         if b"AroMax" in payload or b"DiffuserAro" in payload:
             return True
     return False
+
+
+_WRITABLE = frozenset({"write", "write-without-response"})
+
+
+def classify_gatt(characteristics: dict[str, set[str]]) -> DeviceType | None:
+    """Pick a family from a connected device's GATT table.
+
+    `characteristics` maps each lowercase characteristic UUID to its
+    properties. Used by the config flow for devices the advertisement
+    doesn't identify — those were set up as Aroma-Link unseen, and four
+    of them turned out to be something else (#29, #30, #48, #50).
+
+    Only layouts that belong to exactly one family we can drive are
+    matched. FFE0/FFE1 is shared by Aromely, Scent Tech and other YooAI
+    firmwares with different protocols, so it stays unmatched; those
+    are identified by their advertisement. Aroma-Link is tested first so
+    a unit that also exposes FFF6 keeps the family it got before.
+    """
+    def has(uuid: str, props: frozenset[str] | set[str]) -> bool:
+        return bool(characteristics.get(uuid, set()) & props)
+
+    if has(CHAR_NOTIFY_UUID, {"notify"}) and has(CHAR_WRITE_UUID, _WRITABLE):
+        return DeviceType.AROMA_LINK
+    if has(SM_AK_CHAR_UUID, {"notify"}) and has(SM_AK_CHAR_UUID, _WRITABLE):
+        return DeviceType.SCENT_MARKETING_AK
+    if has(SM_GW_NOTIFY_UUID, {"notify"}) and has(SM_GW_WRITE_UUID, _WRITABLE):
+        return DeviceType.SCENT_MARKETING_GW
+    if has(SCENTIMENT_CHAR_NOTIFY_UUID, {"notify"}) and has(SCENTIMENT_CHAR_WRITE_UUID, _WRITABLE):
+        return DeviceType.SCENTIMENT
+    return None

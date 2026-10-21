@@ -48,11 +48,13 @@
       "cannot_connect": "Cannot connect to device",
       "invalid_auth": "Invalid credentials",
       "no_devices": "No devices found",
-      "unknown": "Unknown error"
+      "unknown": "Unknown error",
+      "probe_failed": "Could not connect to the selected device to identify it. Make sure it is powered on and in range of a Bluetooth adapter or proxy that can connect (passive proxies such as Shelly cannot), then try again."
     },
     "abort": {
       "already_configured": "Device is already configured",
-      "not_supported": "This Bluetooth device is not a supported diffuser"
+      "not_supported": "This Bluetooth device is not a supported diffuser",
+      "unsupported_gatt": "{name} does not match any diffuser family this integration supports. If it is a diffuser, please open an issue at {issues_url} with the manufacturer, the app it uses, and this Bluetooth layout:\n\n```\n{gatt}\n```"
     }
   }
 }

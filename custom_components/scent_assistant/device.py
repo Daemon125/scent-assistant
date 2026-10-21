@@ -20,6 +20,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     DeviceType,
+    BLE_CONNECT_MAX_ATTEMPTS,
     BLE_INITIAL_REFRESH_RETRY_SECONDS,
     BLE_INITIAL_SILENT_READS_MAX,
     SM_AK_CY_PUSH_SETTLE_SECONDS,
@@ -58,10 +59,6 @@ BLE_IDLE_DISCONNECT_SECONDS = 10
 # Cooldown after a failed connect / write before we try again, so a
 # stuck device gets a chance to recover instead of being hammered.
 BLE_FAILURE_COOLDOWN_SECONDS = 3.0
-# bleak_retry_connector max-attempts. HA's bluetooth stack already
-# layers its own retries on top of ours, so keeping this low avoids
-# 6-8 rapid connect attempts that can wedge some firmwares.
-BLE_CONNECT_MAX_ATTEMPTS = 2
 # Aroma-Link 0A clock drift from local time that triggers a 57 17 on refresh.
 AL_CLOCK_DRIFT_SECONDS = 120
 # Refreshes that send the 52 15 week read before a unit that never

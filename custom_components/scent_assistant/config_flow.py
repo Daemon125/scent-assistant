@@ -1,17 +1,22 @@
 """Config flow for Scent Diffuser integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import voluptuous as vol
+from bleak import BleakClient, BleakError
+from bleak_retry_connector import establish_connection
 
 from homeassistant import config_entries
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
     async_discovered_service_info,
 )
 from .const import (
+    BLE_CONNECT_MAX_ATTEMPTS,
     DOMAIN,
     CONF_DEVICE_TYPE,
     CONF_BLE_ADDRESS,
@@ -24,10 +29,36 @@ from .const import (
     CONF_GW_PASSWORD,
     DeviceType,
 )
-from .protocol_ble import detect_device_type, extract_scent_marketing_metadata
+from .protocol_ble import (
+    classify_gatt,
+    detect_device_type,
+    extract_scent_marketing_metadata,
+)
 from .protocol_cloud import AromaLinkCloudClient
 
 _LOGGER = logging.getLogger(__name__)
+
+_BASE_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+ISSUES_URL = "https://github.com/mr-sparks/scent-assistant/issues"
+
+
+def _short_uuid(uuid: str) -> str:
+    """"0000fff1-0000-1000-…" -> "fff1"; other UUIDs unchanged."""
+    if uuid.startswith("0000") and uuid.endswith(_BASE_UUID_SUFFIX):
+        return uuid[4:8]
+    return uuid
+
+
+def _format_gatt(services) -> str:
+    """One line per service, its characteristics with their properties."""
+    lines = []
+    for service in services:
+        chars = ", ".join(
+            f"{_short_uuid(c.uuid)} ({'/'.join(c.properties)})"
+            for c in service.characteristics
+        )
+        lines.append(f"{_short_uuid(service.uuid)}: {chars or '-'}")
+    return "\n".join(lines) or "(no services)"
 
 
 def _advertised_name(info: BluetoothServiceInfoBleak) -> str:
@@ -167,6 +198,9 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Scan for BLE devices and let user select one."""
         errors: dict[str, str] = {}
+        # Selection errors are shown on the re-scanned list; scan errors
+        # replace it.
+        select_errors: dict[str, str] = {}
 
         if user_input is not None:
             address = user_input.get("ble_address")
@@ -175,7 +209,7 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_info = self._discovered_devices.get(address, {})
                 self._selected_ble_address = address
                 self._selected_ble_name = device_info.get("name", "")
-                self._selected_device_type = device_info.get("device_type", "aroma_link")
+                self._selected_device_type = device_info.get("device_type")
                 self._selected_sm_metadata = device_info.get("sm_metadata")
 
                 # Check if already configured. A pending discovery for the
@@ -183,10 +217,30 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(address, raise_on_progress=False)
                 self._abort_if_unique_id_configured()
 
-                if self._needs_password_step():
-                    return await self.async_step_gw_password()
+                if self._selected_device_type is None:
+                    # The advertisement didn't say what this is. It used
+                    # to become Aroma-Link unseen and then fail with
+                    # "fff1 not found" (#29, #30, #48, #50); connect once
+                    # and decide from the GATT table instead.
+                    dtype, gatt = await self._probe_gatt(address)
+                    if gatt is None:
+                        select_errors["base"] = "probe_failed"
+                    elif dtype is None:
+                        return self.async_abort(
+                            reason="unsupported_gatt",
+                            description_placeholders={
+                                "name": self._selected_ble_name or address,
+                                "gatt": gatt,
+                                "issues_url": ISSUES_URL,
+                            },
+                        )
+                    else:
+                        self._selected_device_type = dtype
 
-                return self._create_ble_entry()
+                if not select_errors:
+                    if self._needs_password_step():
+                        return await self.async_step_gw_password()
+                    return self._create_ble_entry()
             # If address is missing, user clicked Submit on an empty error
             # form – fall through to re-scan.
 
@@ -220,7 +274,8 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 self._discovered_devices[info.address] = {
                     "name": name,
-                    "device_type": dtype or DeviceType.AROMA_LINK,
+                    # None: identified from the GATT table once selected.
+                    "device_type": dtype,
                     "rssi": info.rssi,
                     "auto_detected": dtype is not None,
                     "sm_metadata": sm_meta,
@@ -256,8 +311,49 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required("ble_address"): vol.In(device_options),
             }),
-            errors=errors,
+            errors=select_errors,
         )
+
+    async def _probe_gatt(self, address: str) -> tuple[DeviceType | None, str | None]:
+        """Connect once and classify the device by its GATT table.
+
+        Returns (family, table as text); the table is None when the
+        connection failed, the family None when the layout is unknown.
+        """
+        ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+        if ble_device is None:
+            return None, None
+        client = None
+        try:
+            client = await establish_connection(
+                BleakClient,
+                ble_device,
+                self._selected_ble_name or address,
+                max_attempts=BLE_CONNECT_MAX_ATTEMPTS,
+            )
+            services = client.services
+            table = {
+                char.uuid.lower(): set(char.properties)
+                for service in services
+                for char in service.characteristics
+            }
+            dtype = classify_gatt(table)
+            gatt = _format_gatt(services)
+            _LOGGER.info(
+                "GATT probe of %s (%s): %s\n%s",
+                self._selected_ble_name, address,
+                dtype.value if dtype else "no supported layout", gatt,
+            )
+            return dtype, gatt
+        except (BleakError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.warning("GATT probe of %s failed: %s", address, err)
+            return None, None
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception as err:
+                    _LOGGER.debug("GATT probe disconnect from %s: %s", address, err)
 
     # ------------------------------------------------------------------
     # Cloud flow
