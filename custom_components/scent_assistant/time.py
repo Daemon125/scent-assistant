@@ -72,15 +72,9 @@ class DiffuserStartTime(TimeEntity):
 
     async def async_set_value(self, value: time) -> None:
         """Set the start time and write schedule to device."""
-        self._device.require_schedule_read()
-        await self._device.set_schedule(
-            weekday_mask=0x7F,  # all days
-            start_hour=value.hour,
-            start_minute=value.minute,
-            end_hour=self._device.state.end_hour,
-            end_minute=self._device.state.end_minute,
-            work_seconds=self._device.state.work_seconds or 10,
-            pause_seconds=self._device.state.pause_seconds or 120,
+        await self._device.set_schedule_window(
+            value.hour, value.minute,
+            self._device.state.end_hour, self._device.state.end_minute,
         )
 
 
@@ -116,15 +110,9 @@ class DiffuserEndTime(TimeEntity):
 
     async def async_set_value(self, value: time) -> None:
         """Set the end time and write schedule to device."""
-        self._device.require_schedule_read()
-        await self._device.set_schedule(
-            weekday_mask=0x7F,  # all days
-            start_hour=self._device.state.start_hour,
-            start_minute=self._device.state.start_minute,
-            end_hour=value.hour,
-            end_minute=value.minute,
-            work_seconds=self._device.state.work_seconds or 10,
-            pause_seconds=self._device.state.pause_seconds or 120,
+        await self._device.set_schedule_window(
+            self._device.state.start_hour, self._device.state.start_minute,
+            value.hour, value.minute,
         )
 
 

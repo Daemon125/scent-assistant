@@ -1271,6 +1271,28 @@ class ScentDiffuserDevice:
         self._notify_state_changed()
         return False
 
+    async def set_schedule_window(
+        self, start_hour: int, start_minute: int, end_hour: int, end_minute: int,
+    ) -> bool:
+        """Move the schedule window and keep everything else as read.
+
+        The Start/End Time entities used to go through `set_schedule`,
+        which writes every day in Custom mode: a time edit turned a
+        Mon-Fri week into every day, and switched an AK unit running a
+        Level from the device table to Custom.
+        """
+        self.require_schedule_read()
+        fields = ("start_hour", "start_minute", "end_hour", "end_minute")
+        previous = [getattr(self._state, f) for f in fields]
+        for field, value in zip(fields, (start_hour, start_minute, end_hour, end_minute)):
+            setattr(self._state, field, value)
+        if await self._write_schedule_to_device():
+            return True
+        for field, value in zip(fields, previous):
+            setattr(self._state, field, value)
+        self._notify_state_changed()
+        return False
+
     async def set_schedule(
         self,
         weekday_mask: int,
