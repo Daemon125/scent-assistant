@@ -1,0 +1,25 @@
+name: Test release
+
+on:
+  push:
+    tags:
+      - "v*-aromadd.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # checkout turns the pushed tag into a lightweight one; restore its message.
+      - run: git fetch --force --tags
+      # HACS installs scent_assistant.zip (hacs.json zip_release); release-zip.yaml does not run for releases made here.
+      - working-directory: custom_components/scent_assistant
+        run: zip -r -X "$RUNNER_TEMP/scent_assistant.zip" . -x '__pycache__/*' '*.pyc'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-from-tag "$RUNNER_TEMP/scent_assistant.zip"
